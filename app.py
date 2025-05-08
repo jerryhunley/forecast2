@@ -17,10 +17,19 @@ st.title("📊 Recruitment Forecasting Tool")
 def parse_funnel_definition(uploaded_file):
     """Parses the wide-format Stage & Status Breakdown CSV."""
     if uploaded_file is None:
-        return None, None
+        return None, None, None # Return three Nones
     try:
         # Read directly from the uploaded file object
-        df_funnel_def = pd.read_csv(uploaded_file, sep='\t', header=None) # Assuming tab-separated based on paste
+        # Use BytesIO for broader compatibility
+        bytes_data = uploaded_file.getvalue()
+        # Detect encoding or assume utf-8, allow fallback
+        try:
+            stringio = io.StringIO(bytes_data.decode("utf-8"))
+        except UnicodeDecodeError:
+             st.warning("UTF-8 decoding failed for Funnel Definition file, trying latin-1.")
+             stringio = io.StringIO(bytes_data.decode("latin-1")) # Fallback encoding
+             
+        df_funnel_def = pd.read_csv(stringio, sep='\t', header=None) # Explicitly tab-separated
         
         parsed_funnel_definition = {}
         parsed_ordered_stages = []
@@ -39,13 +48,15 @@ def parse_funnel_definition(uploaded_file):
             if stage_name not in statuses: statuses.append(stage_name)
             
             parsed_funnel_definition[stage_name] = statuses
-            ts_col_map[stage_name] = f"TS_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}" 
+            # Create clean column name for timestamps
+            clean_ts_name = f"TS_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
+            ts_col_map[stage_name] = clean_ts_name
             
         if not parsed_ordered_stages: # Basic validation
-             st.error("Could not parse any stages from the Funnel Definition file. Check format.")
+             st.error("Could not parse any stages from the Funnel Definition file. Check format (should be tab-separated).")
              return None, None, None
 
-        st.success("Funnel Definition Parsed Successfully.")
+        # st.success("Funnel Definition Parsed Successfully.") # Keep UI less verbose during run
         return parsed_funnel_definition, parsed_ordered_stages, ts_col_map
         
     except Exception as e:
@@ -54,73 +65,132 @@ def parse_funnel_definition(uploaded_file):
         return None, None, None
 
 def parse_datetime_with_timezone(dt_str):
-    # (Same function as before)
-    if pd.isna(dt_str): return None
+    # (Function to parse various date formats, stripping timezone)
+    if pd.isna(dt_str): return pd.NaT # Return NaT for consistency
     dt_str_cleaned = str(dt_str).strip()
     tz_pattern = r'\s+(?:EST|EDT|CST|CDT|MST|MDT|PST|PDT)$'
     dt_str_no_tz = re.sub(tz_pattern, '', dt_str_cleaned)
-    parsed_dt = pd.to_datetime(dt_str_no_tz, errors='coerce').to_pydatetime() # Flexible parsing
-    return parsed_dt
+    # Use pd.to_datetime as a flexible parser, coercing errors to NaT
+    parsed_dt = pd.to_datetime(dt_str_no_tz, errors='coerce') 
+    # Convert to Python datetime if needed, else return pandas Timestamp or NaT
+    try:
+        return parsed_dt.to_pydatetime()
+    except AttributeError: # Handle NaT
+        return pd.NaT
+
 
 def parse_history_string(history_str):
-    # (Same function as before)
+    # (Function to parse newline-separated history strings)
     if pd.isna(history_str) or str(history_str).strip() == "": return []
-    pattern = re.compile(r"([\w\s().'/:-]+?):\s*(\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}\s*(?:[apAP][mM])?\s*[A-Za-z]{3,}(?:T)?)")
+    # More robust pattern to handle variations
+    pattern = re.compile(r"([\w\s().'/:-]+?):\s*(\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}(?:\s*[apAP][mM])?(?:\s+[A-Za-z]{3,}(?:T)?)?)")
+    
     raw_lines = str(history_str).strip().split('\n')
     parsed_events = []
+    malformed_lines = 0
     for line in raw_lines:
         line = line.strip();
         if not line: continue
         match = pattern.match(line)
         if match:
             name, dt_str = match.groups(); name = name.strip()
-            dt_obj = parse_datetime_with_timezone(dt_str.strip())
-            if name and dt_obj: parsed_events.append((name, dt_obj))
-    parsed_events.sort(key=lambda x: x[1] if x[1] is not None else datetime.min)
+            dt_obj = parse_datetime_with_timezone(dt_str.strip()) # Returns datetime or NaT
+            # Only add if date is valid
+            if name and pd.notna(dt_obj): 
+                parsed_events.append((name, dt_obj)) # Keep as datetime object
+            # Optionally log malformed dates here if needed for debugging
+            # elif name: print(f"Debug date parse fail: {dt_str}") 
+        else:
+             malformed_lines += 1
+    
+    # Optional warning about lines that didn't match the pattern
+    # if malformed_lines > 0: print(f"Debug: {malformed_lines} history lines didn't match expected pattern.")
+            
+    # Sort by datetime object, handling potential NaT values
+    try:
+        parsed_events.sort(key=lambda x: x[1] if pd.notna(x[1]) else datetime.min)
+    except TypeError as e:
+        st.warning(f"Could not sort all history events due to data type issue: {e}. Some events might be out of order.")
+    
     return parsed_events
 
+
 def get_stage_timestamps(row, parsed_stage_history_col, parsed_status_history_col, funnel_def, ordered_stgs, ts_col_mapping):
-    # (Same function as before)
+    # (Function to determine first timestamp for each stage)
     timestamps = {ts_col_mapping[stage]: pd.NaT for stage in ordered_stgs}
     status_to_stage_map = {}
     if not funnel_def: return pd.Series(timestamps) # Handle case where funnel_def is None
+    
     for stage, statuses in funnel_def.items():
         for status in statuses: status_to_stage_map[status] = stage
+        
     all_events = []
-    if parsed_stage_history_col in row and row[parsed_stage_history_col]:
-        all_events.extend([(name, dt) for name, dt in row[parsed_stage_history_col]])
-    if parsed_status_history_col in row and row[parsed_status_history_col]:
-        all_events.extend([(name, dt) for name, dt in row[parsed_status_history_col]])
-    all_events.sort(key=lambda x: x[1] if x[1] is not None else datetime.min)
+    # Use .get() on row to handle potentially missing parsed history columns gracefully
+    stage_hist = row.get(parsed_stage_history_col, [])
+    status_hist = row.get(parsed_status_history_col, [])
+    if stage_hist: all_events.extend([(name, dt) for name, dt in stage_hist])
+    if status_hist: all_events.extend([(name, dt) for name, dt in status_hist])
+    
+    # Sort all events chronologically
+    try:
+         # Ensure comparison works with pd.Timestamp or NaT
+         all_events.sort(key=lambda x: x[1] if pd.notna(x[1]) else pd.Timestamp.min) 
+    except TypeError as e:
+         # Log or handle error if sorting fails due to mixed types not handled above
+         pass 
+
     for event_name, event_dt in all_events:
-        if event_dt is pd.NaT or event_dt is None: continue
+        # Ensure event_dt is a comparable datetime object or NaT
+        if pd.isna(event_dt): continue 
+        
         event_stage = None
         if event_name in ordered_stgs: event_stage = event_name
         elif event_name in status_to_stage_map: event_stage = status_to_stage_map[event_name]
+        
         if event_stage and event_stage in ordered_stgs:
-            ts_col_name = ts_col_mapping.get(event_stage) # Use .get for safety
+            ts_col_name = ts_col_mapping.get(event_stage) 
             if ts_col_name and pd.isna(timestamps[ts_col_name]): 
-                timestamps[ts_col_name] = event_dt
+                timestamps[ts_col_name] = event_dt # Assign the first valid timestamp
+                
+    # Convert dictionary to pandas Series before returning
     return pd.Series(timestamps)
 
+
 @st.cache_data # Cache the processed referral data
-def preprocess_referral_data(df, funnel_def, ordered_stages, ts_col_map):
-    """Parses history, calculates timestamps."""
-    if df is None or funnel_def is None or ordered_stages is None or ts_col_map is None:
+def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
+    """Loads, cleans, parses history, calculates timestamps."""
+    if _df_raw is None or funnel_def is None or ordered_stages is None or ts_col_map is None:
+        st.warning("Preprocessing cannot proceed: Missing key inputs (dataframe or funnel definition).")
         return None
         
+    df = _df_raw.copy() # Work on a copy
+
     # 1. Check for Submitted On Date
-    if "Submitted On" not in df.columns:
-        if "Referral Date" in df.columns:
-             st.info("Using 'Referral Date' column as 'Submitted On'.")
-             df.rename(columns={"Referral Date": "Submitted On"}, inplace=True)
-        else:
-             st.error("Missing required 'Submitted On' or 'Referral Date' column.")
-             return None
+    submitted_on_col = None
+    if "Submitted On" in df.columns:
+        submitted_on_col = "Submitted On"
+    elif "Referral Date" in df.columns:
+         st.info("Using 'Referral Date' column as 'Submitted On'.")
+         df.rename(columns={"Referral Date": "Submitted On"}, inplace=True)
+         submitted_on_col = "Submitted On"
+    else:
+         st.error("Missing required 'Submitted On' or 'Referral Date' column in Referral Data.")
+         return None
              
-    df["Submitted On"] = df["Submitted On"].apply(lambda x: parse_datetime_with_timezone(str(x)))
-    df.dropna(subset=["Submitted On"], inplace=True) # Remove rows where submission date couldn't be parsed
-    df["Submission_Month"] = df["Submitted On"].dt.to_period('M')
+    # Convert to datetime, coercing errors. Do this BEFORE dropping NaNs.
+    df["Submitted On_DT"] = df[submitted_on_col].apply(lambda x: parse_datetime_with_timezone(str(x)))
+    initial_rows = len(df)
+    df.dropna(subset=["Submitted On_DT"], inplace=True) # Remove rows where submission date couldn't be parsed
+    rows_dropped = initial_rows - len(df)
+    if rows_dropped > 0:
+        st.warning(f"Dropped {rows_dropped} rows due to unparseable '{submitted_on_col}' date.")
+        
+    if df.empty:
+         st.error("No valid referral data remaining after date parsing.")
+         return None
+         
+    # Ensure the original Submitted On is string if needed elsewhere, use _DT version for dates
+    df["Submission_Month"] = df["Submitted On_DT"].dt.to_period('M')
     
     # 2. Parse History Columns
     history_cols_to_parse = ['Lead Stage History', 'Lead Status History']
@@ -128,8 +198,9 @@ def preprocess_referral_data(df, funnel_def, ordered_stages, ts_col_map):
     for col_name in history_cols_to_parse:
         if col_name in df.columns:
             parsed_col_name = f"Parsed_{col_name.replace(' ', '_')}"
-            df[parsed_col_name] = df[col_name].apply(parse_history_string)
-            parsed_cols[col_name] = parsed_col_name # Store mapping for timestamping
+            # Ensure Apply works even if column has mixed types initially
+            df[parsed_col_name] = df[col_name].astype(str).apply(parse_history_string) 
+            parsed_cols[col_name] = parsed_col_name 
         else:
              st.warning(f"History column '{col_name}' not found.")
 
@@ -138,9 +209,14 @@ def preprocess_referral_data(df, funnel_def, ordered_stages, ts_col_map):
     parsed_status_hist_col = parsed_cols.get('Lead Status History')
     
     if not parsed_stage_hist_col and not parsed_status_hist_col:
-        st.error("No history columns found to parse for timestamps.")
-        return None
+        # Check if relevant columns just don't exist
+        if 'Lead Stage History' not in df.columns and 'Lead Status History' not in df.columns:
+             st.error("Neither 'Lead Stage History' nor 'Lead Status History' columns found in data.")
+        else: # Columns exist but weren't parsed (shouldn't happen with current logic)
+             st.error("History columns found but failed to parse for timestamps.")
+        return None # Cannot proceed without history
 
+    # Apply timestamp function
     timestamp_cols_df = df.apply(
         lambda row: get_stage_timestamps(
             row, 
@@ -156,182 +232,310 @@ def preprocess_referral_data(df, funnel_def, ordered_stages, ts_col_map):
     old_ts_cols = [col for col in df.columns if col.startswith('TS_')]
     df.drop(columns=old_ts_cols, inplace=True, errors='ignore')
     
+    # Concatenate new timestamp columns
     df = pd.concat([df, timestamp_cols_df], axis=1)
     
     # Ensure TS columns are datetime type
     for stage, ts_col in ts_col_map.items():
          if ts_col in df.columns:
-             df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce')
+             # Important: Ensure it's datetime AFTER concatenation
+             df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce') 
              
     st.success("Referral Data Preprocessed Successfully.")
     return df
 
-# --- Placeholder Function for ProForma Calc ---
-# (Logic from Turn 34/40 will go here)
-def calculate_proforma_metrics(processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
+# --- Calculation Functions for App Sections ---
+
+# @st.cache_data # Cache calculation results if inputs don't change
+def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
     """ Calculates historical monthly cohort metrics."""
-    if processed_df is None or not isinstance(monthly_ad_spend_input, dict):
-        st.warning("Cannot calculate ProForma: Missing data or invalid Ad Spend input.")
-        return pd.DataFrame() # Return empty dataframe
-
-    cohort_summary = processed_df.groupby("Submission_Month").size().reset_index(name="Total Qualified Referrals")
-    cohort_summary = cohort_summary.set_index("Submission_Month")
-    
-    # Use the Ad Spend input dictionary
-    cohort_summary["Ad Spend"] = cohort_summary.index.map(monthly_ad_spend_input).fillna(0)
+    # Add input validation
+    if _processed_df is None or _processed_df.empty:
+        st.warning("Cannot calculate ProForma: No valid processed referral data.")
+        return pd.DataFrame()
+    if not isinstance(monthly_ad_spend_input, dict):
+         st.warning("Cannot calculate ProForma: Invalid Ad Spend input (must be a dictionary).")
+         return pd.DataFrame()
+    if "Submission_Month" not in _processed_df.columns:
+        st.error("Cannot calculate ProForma: 'Submission_Month' column missing.")
+        return pd.DataFrame()
         
-    reached_stage_cols_map = {}
-    for stage_name in ordered_stages:
-        ts_col = ts_col_map.get(stage_name)
-        if ts_col and ts_col in processed_df.columns:
-            reached_col_cleaned = f"Reached_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
-            reached_stage_cols_map[stage_name] = reached_col_cleaned
-            reached_stage_count = processed_df.dropna(subset=[ts_col]).groupby("Submission_Month").size()
-            cohort_summary[reached_col_cleaned] = reached_stage_count
+    processed_df = _processed_df.copy() # Work on copy
+
+    # --- Cohort Summary Calculation --- 
+    try:
+        cohort_summary = processed_df.groupby("Submission_Month").size().reset_index(name="Total Qualified Referrals")
+        cohort_summary = cohort_summary.set_index("Submission_Month")
         
-    cohort_summary = cohort_summary.fillna(0)
-    for col in cohort_summary.columns:
-        if col != "Ad Spend": cohort_summary[col] = cohort_summary[col].astype(int)
-    cohort_summary["Ad Spend"] = cohort_summary["Ad Spend"].astype(float)
+        # Map Ad Spend - Ensure keys match PeriodIndex
+        cohort_summary["Ad Spend"] = cohort_summary.index.map(monthly_ad_spend_input).fillna(0) 
+            
+        reached_stage_cols_map = {}
+        for stage_name in ordered_stages:
+            ts_col = ts_col_map.get(stage_name)
+            if ts_col and ts_col in processed_df.columns:
+                reached_col_cleaned = f"Reached_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
+                reached_stage_cols_map[stage_name] = reached_col_cleaned
+                # Ensure timestamp column is datetime before using dropna
+                if pd.api.types.is_datetime64_any_dtype(processed_df[ts_col]):
+                     reached_stage_count = processed_df.dropna(subset=[ts_col]).groupby("Submission_Month").size()
+                     cohort_summary[reached_col_cleaned] = reached_stage_count
+                else:
+                     st.warning(f"Timestamp column {ts_col} is not datetime. Cannot count reached stage.")
+                     cohort_summary[reached_col_cleaned] = 0 # Assign 0 if TS column invalid
+            
+        cohort_summary = cohort_summary.fillna(0)
+        # Convert count columns safely to int
+        for col in cohort_summary.columns:
+            if col != "Ad Spend": 
+                try:
+                    cohort_summary[col] = cohort_summary[col].astype(int)
+                except ValueError: # Handle potential non-integer values if error occurs upstream
+                     cohort_summary[col] = pd.to_numeric(cohort_summary[col], errors='coerce').fillna(0).astype(int)
+                     st.warning(f"Had trouble converting column {col} to integer, check data.")
+
+        cohort_summary["Ad Spend"] = cohort_summary["Ad Spend"].astype(float)
         
-    pof_reached_col = reached_stage_cols_map.get("Passed Online Form")
-    if pof_reached_col and pof_reached_col in cohort_summary.columns:
-        cohort_summary.rename(columns={pof_reached_col: "Pre-Screener Qualified"}, inplace=True)
-        base_count_col = "Pre-Screener Qualified"
-    elif "Total Qualified Referrals" in cohort_summary.columns :
-        cohort_summary.rename(columns={"Total Qualified Referrals": "Pre-Screener Qualified"}, inplace=True)
-        base_count_col = "Pre-Screener Qualified"
-    else:
-        base_count_col = None 
+        # Determine base count column
+        pof_reached_col = reached_stage_cols_map.get("Passed Online Form")
+        if pof_reached_col and pof_reached_col in cohort_summary.columns:
+            cohort_summary.rename(columns={pof_reached_col: "Pre-Screener Qualified"}, inplace=True)
+            base_count_col = "Pre-Screener Qualified"
+        elif "Total Qualified Referrals" in cohort_summary.columns :
+            cohort_summary.rename(columns={"Total Qualified Referrals": "Pre-Screener Qualified"}, inplace=True)
+            base_count_col = "Pre-Screener Qualified"
+        else:
+            base_count_col = None 
+            st.error("Base count column for ProForma not found.")
+            return pd.DataFrame()
 
-    proforma_metrics = pd.DataFrame(index=cohort_summary.index)
-        
-    if base_count_col: 
-        proforma_metrics["Ad Spend"] = cohort_summary["Ad Spend"]
-        proforma_metrics["Pre-Screener Qualified"] = cohort_summary[base_count_col]
-        proforma_metrics["Cost per Qualified Pre-screen"] = (cohort_summary["Ad Spend"] / cohort_summary[base_count_col].replace(0, pd.NA)).round(2)
+        # --- Build final metrics table ---
+        proforma_metrics = pd.DataFrame(index=cohort_summary.index)
+            
+        # Check if base_count_col exists before proceeding
+        if base_count_col and base_count_col in cohort_summary.columns: 
+            proforma_metrics["Ad Spend"] = cohort_summary["Ad Spend"]
+            proforma_metrics["Pre-Screener Qualified"] = cohort_summary[base_count_col]
+            proforma_metrics["Cost per Qualified Pre-screen"] = (cohort_summary["Ad Spend"] / cohort_summary[base_count_col].replace(0, np.nan)).round(2) # Use np.nan for division
 
-        sts_col_name = reached_stage_cols_map.get("Sent To Site")
-        if sts_col_name in cohort_summary.columns: proforma_metrics["Total StS"] = cohort_summary[sts_col_name]
-             
-        appt_col_name = reached_stage_cols_map.get("Appointment Scheduled")
-        if appt_col_name in cohort_summary.columns: proforma_metrics["Total Appt Scheduled"] = cohort_summary[appt_col_name]
-             
-        icf_col_name = reached_stage_cols_map.get("Signed ICF")
-        if icf_col_name in cohort_summary.columns: proforma_metrics["Total ICF"] = cohort_summary[icf_col_name]
+            # Safely add columns if they exist in cohort_summary
+            for stage_orig, reached_col in reached_stage_cols_map.items():
+                 metric_name = "Pre-Screener Qualified" if stage_orig == "Passed Online Form" else f"Total {stage_orig}"
+                 if reached_col in cohort_summary.columns and metric_name not in proforma_metrics.columns:
+                     proforma_metrics[metric_name] = cohort_summary[reached_col]
 
-        enrolled_col_name = reached_stage_cols_map.get("Enrolled")
-        if enrolled_col_name in cohort_summary.columns: proforma_metrics["Total Enrolled"] = cohort_summary[enrolled_col_name]
-             
-        sf_col_name = reached_stage_cols_map.get("Screen Failed")
-        if sf_col_name in cohort_summary.columns: proforma_metrics["Total Screen Failed"] = cohort_summary[sf_col_name]
+            # --- Conversion Rates ---
+            # Ensure required columns exist before calculating rates
+            sts_col = reached_stage_cols_map.get("Sent To Site")
+            appt_col = reached_stage_cols_map.get("Appointment Scheduled")
+            icf_col = reached_stage_cols_map.get("Signed ICF")
 
-        lost_col_name = reached_stage_cols_map.get("Lost")
-        if lost_col_name in cohort_summary.columns: proforma_metrics["Total Lost"] = cohort_summary[lost_col_name]
+            if sts_col in cohort_summary.columns:
+                proforma_metrics["Qualified to StS %"] = (cohort_summary[sts_col] / cohort_summary[base_count_col].replace(0, np.nan))
+            if sts_col in cohort_summary.columns and appt_col in cohort_summary.columns:
+                proforma_metrics["StS to Appt Sched %"] = (cohort_summary[appt_col] / cohort_summary[sts_col].replace(0, np.nan))
+            if appt_col in cohort_summary.columns and icf_col in cohort_summary.columns:
+                proforma_metrics["Appt Sched to ICF %"] = (cohort_summary[icf_col] / cohort_summary[appt_col].replace(0, np.nan))
+            if icf_col in cohort_summary.columns:
+                proforma_metrics["Qualified to ICF %"] = (cohort_summary[icf_col] / cohort_summary[base_count_col].replace(0, np.nan))
+                proforma_metrics["Cost Per ICF"] = (cohort_summary["Ad Spend"] / cohort_summary[icf_col].replace(0, np.nan)).round(2)
+        else:
+             st.error("Base count column missing, cannot calculate detailed ProForma metrics.")
+             return pd.DataFrame()
 
-        # --- Conversion Rates ---
-        if sts_col_name in cohort_summary.columns:
-            proforma_metrics["Qualified to StS %"] = (cohort_summary[sts_col_name] / cohort_summary[base_count_col].replace(0, pd.NA))
-        if sts_col_name in cohort_summary.columns and appt_col_name in cohort_summary.columns:
-            proforma_metrics["StS to Appt Sched %"] = (cohort_summary[appt_col_name] / cohort_summary[sts_col_name].replace(0, pd.NA))
-        if appt_col_name in cohort_summary.columns and icf_col_name in cohort_summary.columns:
-            proforma_metrics["Appt Sched to ICF %"] = (cohort_summary[icf_col_name] / cohort_summary[appt_col_name].replace(0, pd.NA))
-        if icf_col_name in cohort_summary.columns:
-            proforma_metrics["Qualified to ICF %"] = (cohort_summary[icf_col_name] / cohort_summary[base_count_col].replace(0, pd.NA))
-            proforma_metrics["Cost Per ICF"] = (cohort_summary["Ad Spend"] / cohort_summary[icf_col_name].replace(0, pd.NA)).round(2)
+        return proforma_metrics
 
-    return proforma_metrics
+    except Exception as e:
+         st.error(f"Error during ProForma calculation: {e}")
+         return pd.DataFrame()
+
+
+# --- Placeholder Functions for other Pillars --- 
+# (These need their respective logic filled in)
+def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
+     st.write("Site metrics calculation logic to be implemented here.")
+     # Logic from Turn 42 goes here...
+     # Example structure:
+     # site_metrics = _processed_df.groupby('Site').agg(...) 
+     # return site_metrics
+     return pd.DataFrame({'Site': ['Site A', 'Site B'], 'Info': ['Calculation Pending', 'Calculation Pending']}) # Placeholder
+
+def score_sites(_site_metrics_df, weights):
+     st.write("Site scoring logic to be implemented here.")
+     # Logic from Turn 44 goes here...
+     # Add score and grade columns
+     if not _site_metrics_df.empty:
+          _site_metrics_df['Score'] = 0 
+          _site_metrics_df['Grade'] = 'N/A'
+          return _site_metrics_df
+     return pd.DataFrame({'Site': ['Site A', 'Site B'],'Score': [0, 0], 'Grade': ['N/A', 'N/A'], 'Info':['Calculation Pending','Calculation Pending']}) # Placeholder
+
+def calculate_projections(_processed_df, ordered_stages, ts_col_map, /* add projection inputs */):
+     st.write("Projection calculation logic to be implemented here.")
+     # Logic from Turn 40 goes here...
+     return pd.DataFrame({'Month': ['Apr-25', 'May-25'],'Projected ICF': [0, 0], 'Info': ['Calculation Pending','Calculation Pending']}) # Placeholder
+
 
 # --- Streamlit UI ---
 
 # Sidebar for Inputs
 with st.sidebar:
-    st.header("⚙️ Inputs")
+    st.header("⚙️ Setup")
     
-    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV/TSV)", type=["csv", "tsv"])
-    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv", "csv"]) # Assume TSV based on paste
+    # Use unique keys for file uploaders
+    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV/TSV)", type=["csv", "tsv"], key="referral_uploader")
+    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv", "csv"], key="funnel_uploader") 
 
-    # Placeholder for Ad Spend Input (more sophisticated input needed later)
-    st.subheader("Ad Spend (Monthly)")
-    spend_month_1 = st.number_input("Spend Month 1 (e.g., Apr 2025)", value=20000.0, step=1000.0, format="%.2f")
-    spend_month_2 = st.number_input("Spend Month 2 (e.g., May 2025)", value=20000.0, step=1000.0, format="%.2f")
-    # Add more months or a better input method like a table
-    # For now, create a dictionary for the ProForma function using dummy future months if needed
-    # This part needs improvement for actual use with historical data
+    st.divider()
+    
+    # --- Inputs for Calculations ---
+    st.subheader("Historical Ad Spend (Monthly)")
+    st.info("Enter **historical** spend for past months found in data. (More dynamic input generation is needed).")
+    # Example - needs dynamic generation based on data months
+    # Using fixed keys for demonstration - this needs to adapt to actual data months
     ad_spend_input_dict = {
-         # We need actual historical months here from data - this is just placeholder logic
-         pd.Period('2025-02', freq='M'): 45000.00, 
-         pd.Period('2025-03', freq='M'): 60000.00
-         # In reality, we'd get months from data or allow user mapping
+         pd.Period('2025-02', freq='M'): st.number_input("Spend Feb 2025", value=45000.0, step=1000.0, format="%.2f", key="spend_feb"), 
+         pd.Period('2025-03', freq='M'): st.number_input("Spend Mar 2025", value=60000.0, step=1000.0, format="%.2f", key="spend_mar")
+         # TODO: Dynamically create these inputs based on months in uploaded data
     }
+    st.caption("Note: These inputs are currently placeholders for testing.")
 
-    st.info("Placeholder Ad Spend used for calculations currently. Actual input fields needed.")
 
-
-# --- Main App Logic ---
+# --- Main App Logic & Display ---
+referral_data_processed = None # Initialize
+funnel_definition, ordered_stages, ts_col_map = None, None, None # Initialize
 
 # Load and process data only if both files are uploaded
 if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
     
-    # Parse Funnel Definition
-    funnel_def, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
+    # Step 1: Parse Funnel Definition (Cached)
+    funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
 
-    # Load and Preprocess Referral Data
-    try:
-         # Use StringIO to handle the uploaded file object's content
-         stringio = io.StringIO(uploaded_referral_file.getvalue().decode("utf-8"))
-         referrals_raw_df = pd.read_csv(stringio, sep=None, engine='python') # Auto-detect separator
-         st.success("Referral Data Loaded.")
-         
-         processed_referrals_df = preprocess_referral_data(
-             referrals_raw_df.copy(), # Pass a copy to avoid modifying cached data
-             funnel_def, 
+    # Step 2: Load and Preprocess Referral Data (Cached)
+    if funnel_definition and ordered_stages and ts_col_map: 
+        try:
+             bytes_data = uploaded_referral_file.getvalue()
+             try:
+                 decoded_data = bytes_data.decode("utf-8")
+             except UnicodeDecodeError:
+                 st.warning("UTF-8 decoding failed for referral data, trying latin-1.")
+                 decoded_data = bytes_data.decode("latin-1") 
+
+             stringio = io.StringIO(decoded_data)
+             
+             # --- Using Modified pd.read_csv ---
+             try:
+                  referrals_raw_df = pd.read_csv(stringio, sep='\t', header=0, on_bad_lines='warn', low_memory=False) 
+                  st.success("Referral Data Loaded (assuming TSV with header).")
+                  
+                  # --- Run Preprocessing ---
+                  referral_data_processed = preprocess_referral_data(
+                      referrals_raw_df, 
+                      funnel_definition, 
+                      ordered_stages, 
+                      ts_col_map
+                  )
+
+             except Exception as read_err:
+                  st.error(f"Error reading referral file with specified settings (TSV, header=0): {read_err}")
+                  st.error("Please ensure the file is tab-separated and the first row is a correct header.")
+                 
+        except Exception as e:
+             st.error(f"An unexpected error occurred during referral data loading: {e}")
+
+# --- Display Sections ---
+if referral_data_processed is not None and not referral_data_processed.empty:
+    st.markdown("---")
+    
+    # Use tabs for different sections
+    tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
+
+    with tab1:
+        st.header("Monthly ProForma (Historical Cohorts)")
+        st.write("Shows historical performance based on the month referrals were submitted.")
+             
+        # Calculate ProForma Metrics
+        proforma_df = calculate_proforma_metrics(
+             referral_data_processed, 
              ordered_stages, 
-             ts_col_map
+             ts_col_map, 
+             ad_spend_input_dict # Pass the ad spend dictionary from sidebar
          )
 
-         if processed_referrals_df is not None:
-             st.markdown("---")
-             st.header("📅 Monthly ProForma")
-             
-             # Calculate ProForma Metrics
-             proforma_df = calculate_proforma_metrics(
-                 processed_referrals_df, 
-                 ordered_stages, 
-                 ts_col_map, 
-                 ad_spend_input_dict # Pass the ad spend dictionary
-             )
-
-             if not proforma_df.empty:
-                 # Transpose and Format for display
-                 proforma_display = proforma_df.transpose()
-                 proforma_display.columns = [str(col) for col in proforma_display.columns] # Format month columns
+        if not proforma_df.empty:
+            # Transpose and Format for display
+            proforma_display = proforma_df.transpose()
+            # Convert PeriodIndex columns to string for display
+            proforma_display.columns = [str(col) for col in proforma_display.columns] 
                  
-                 # Apply formatting (similar to previous step)
-                 st.dataframe(proforma_display.style.format(na_rep='-', 
-                      formatter={col: "${:,.2f}" for col in proforma_display.index if 'Cost' in col or 'Spend' in col} |
-                                {col: "{:,.0f}" for col in proforma_display.index if 'Total' in col or 'Qualified' in col} |
-                                {col: "{:.1%}" for col in proforma_display.index if '%' in col} 
-                 ))
-             else:
-                 st.warning("Could not generate ProForma table.")
+            # Apply formatting (more robustly)
+            format_dict = {}
+            for idx in proforma_display.index:
+                 if 'Cost' in idx or 'Spend' in idx: format_dict[idx] = "${:,.2f}"
+                 elif '%' in idx: format_dict[idx] = "{:.1%}"
+                 elif 'Total' in idx or 'Qualified' in idx: format_dict[idx] = "{:,.0f}"
+                 # Add other formats if needed
+
+            st.dataframe(proforma_display.style.format(format_dict, na_rep='-'))
+            
+            # Add download button for the proforma table
+            try:
+                 csv = proforma_display.to_csv(index=True).encode('utf-8')
+                 st.download_button(
+                      label="Download ProForma Data as CSV",
+                      data=csv,
+                      file_name='monthly_proforma.csv',
+                      mime='text/csv',
+                  )
+            except Exception as e:
+                 st.warning(f"Could not generate download button: {e}")
+                 
+        else:
+            st.warning("Could not generate ProForma table based on the processed data.")
 
 
-             # Placeholder for other sections
-             st.markdown("---")
-             st.header("📈 Projections (Placeholder)")
-             st.write("Projection logic will be added here.")
+    with tab2:
+        st.header("Site Performance Ranking")
+        st.write("Calculates metrics and scores for each site.")
+        
+        st.info("Site scoring calculation logic needs to be implemented in the 'calculate_site_metrics' and 'score_sites' functions.")
+        
+        # --- Call site metric calculation functions (when implemented) ---
+        site_metrics_calc = calculate_site_metrics(referral_data_processed, ordered_stages, ts_col_map)
+        
+        # Placeholder for weights input - In a real app, get this from sidebar widgets
+        site_score_weights_example = {
+             "Qual -> ICF %": 0.20, "Avg TTC (Days)": -0.25, "Avg Funnel Movement Steps": 0.05,
+             "Site Screen Fail %": -0.05, "StS -> Appt %": 0.30, "Appt -> ICF %": 0.15
+        }
+        
+        ranked_sites = score_sites(site_metrics_calc, site_score_weights_example) # Pass calculated metrics
+        
+        st.dataframe(ranked_sites) # Display results (currently placeholders)
 
-             st.markdown("---")
-             st.header("🏆 Site Performance (Placeholder)")
-             st.write("Site ranking logic will be added here.")
-             
-         else:
-             st.warning("Referral data preprocessing failed. Cannot proceed.")
-             
-    except Exception as e:
-         st.error(f"Error loading or processing referral data: {e}")
-         st.error("Please ensure referral file is a valid CSV/TSV.")
 
-else:
-    st.info("Please upload both the Referral Data and Funnel Definition files using the sidebar.")
+    with tab3:
+        st.header("Projections")
+        st.write("Forecasts future performance based on assumptions.")
+        
+        st.info("Projection calculation logic needs to be implemented in the 'calculate_projections' function using inputs from the sidebar.")
+        
+        # --- Call projection function (when implemented) ---
+        # Placeholder inputs - In real app, get from sidebar widgets
+        # projection_inputs = { 'horizon': 12, 'spend': {...}, 'cpqr': 120, 'conv_rates':{...} }
+        # projected_icfs = calculate_projections(referral_data_processed, ordered_stages, ts_col_map, projection_inputs)
+        # st.dataframe(projected_icfs)
+
+        # Placeholder display
+        st.dataframe(pd.DataFrame({
+            'Month': ['Apr-25', 'May-25', 'Jun-25'],
+            'Info': ['Calculation Pending', 'Calculation Pending','Calculation Pending']
+            }))
+
+# Display initial message if files are not uploaded
+elif not uploaded_referral_file or not uploaded_funnel_def_file:
+    st.info("👋 Welcome! Please upload both the Referral Data and Funnel Definition files using the sidebar to begin.")
+
+# Add a footer or other info if desired
+# st.markdown("---")
+# st.caption("App by [Your Name/Company]")
