@@ -12,11 +12,9 @@ st.set_page_config(page_title="Recruitment Forecasting Tool", layout="wide")
 st.title("📊 Recruitment Forecasting Tool")
 
 # --- Helper Functions (Data Parsing & Timestamping) ---
-# (parse_funnel_definition, parse_datetime_with_timezone, 
-#  parse_history_string, get_stage_timestamps, preprocess_referral_data 
-#  remain the same as in the previous version - Turn 56)
+# These functions encapsulate the logic we developed previously.
 
-@st.cache_data 
+@st.cache_data # Cache the result of parsing the funnel definition
 def parse_funnel_definition(uploaded_file):
     """Parses the wide-format Stage & Status Breakdown CSV."""
     if uploaded_file is None: return None, None, None 
@@ -138,7 +136,7 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
     parsed_status_hist_col = parsed_cols.get('Lead Status History')
     if not parsed_stage_hist_col and not parsed_status_hist_col:
         if 'Lead Stage History' not in df.columns and 'Lead Status History' not in df.columns: st.error("Neither history column found.")
-        else: st.error("History columns failed to parse.")
+        else: st.error("History columns failed to parse for timestamps.")
         return None 
     timestamp_cols_df = df.apply(lambda row: get_stage_timestamps(row, parsed_stage_hist_col, parsed_status_hist_col, funnel_def, ordered_stages, ts_col_map), axis=1)
     old_ts_cols = [col for col in df.columns if col.startswith('TS_')]
@@ -151,7 +149,7 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
 
 # --- Calculation Functions for App Sections ---
 
-# @st.cache_data # Consider caching if inputs (df, spend) don't change often
+# @st.cache_data 
 def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
     """ Calculates historical monthly cohort metrics."""
     if _processed_df is None or _processed_df.empty: return pd.DataFrame()
@@ -200,13 +198,14 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
             if icf_col in cohort_summary.columns:
                 proforma_metrics["Qualified to ICF %"] = (cohort_summary[icf_col] / cohort_summary[base_count_col].replace(0, np.nan))
                 proforma_metrics["Cost Per ICF"] = (cohort_summary["Ad Spend"] / cohort_summary[icf_col].replace(0, np.nan)).round(2)
+        else: return pd.DataFrame()
         return proforma_metrics
     except Exception as e: st.error(f"Error during ProForma calculation: {e}"); return pd.DataFrame()
 
-# @st.cache_data # Avoid caching until logic is stable and inputs defined
+# @st.cache_data 
 def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     """Calculates basic and advanced metrics per site."""
-    st.write("Calculating site metrics...") # Progress indicator
+    # st.write("Calculating site metrics...") # Can enable for debugging
     if _processed_df is None or _processed_df.empty or 'Site' not in _processed_df.columns:
         st.warning("Cannot calculate site metrics: Missing data or 'Site' column.")
         return pd.DataFrame() 
@@ -215,27 +214,23 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     site_metrics_list = []
     site_groups = processed_df.groupby('Site')
 
-    # Define key stages & statuses
     qual_stage = "Passed Online Form"; sts_stage = "Sent To Site"; appt_stage = "Appointment Scheduled"
     icf_stage = "Signed ICF"; sf_stage = "Screen Failed"
     ts_qual_col = ts_col_map.get(qual_stage); ts_sts_col = ts_col_map.get(sts_stage)
     ts_appt_col = ts_col_map.get(appt_stage); ts_icf_col = ts_col_map.get(icf_stage)
     ts_sf_col = ts_col_map.get(sf_stage)
-    site_contact_attempt_statuses = ["Site Contact Attempt 1"] # Assumption
+    site_contact_attempt_statuses = ["Site Contact Attempt 1"] 
     post_sts_progress_stages = ["Appointment Scheduled", "Signed ICF", "Enrolled", "Screen Failed"] 
     
-    # Check required TS columns exist
     required_ts_cols = [ts_qual_col, ts_sts_col, ts_appt_col, ts_icf_col, ts_sf_col]
-    if not all(col in processed_df.columns for col in required_ts_cols if col is not None):
-         st.warning(f"One or more required timestamp columns missing ({[col for col in required_ts_cols if col not in processed_df.columns]}). Some site metrics may be inaccurate.")
-         # Pad missing columns with NaT if absolutely necessary, though better to check upstream
-         for col in required_ts_cols:
-             if col and col not in processed_df.columns: processed_df[col] = pd.NaT
-
+    for col in required_ts_cols:
+        if col and col not in processed_df.columns: 
+            st.warning(f"Timestamp column {col} missing for site metrics. Adding empty.")
+            processed_df[col] = pd.NaT
+            processed_df[col] = pd.to_datetime(processed_df[col], errors='coerce') # Ensure dtype
 
     for site_name, group in site_groups:
         metrics = {'Site': site_name}
-        # Basic Counts & Conversions
         metrics['Total Qualified'] = group.shape[0] 
         reached_sts = group[ts_sts_col].notna().sum() if ts_sts_col else 0
         reached_appt = group[ts_appt_col].notna().sum() if ts_appt_col else 0
@@ -246,118 +241,127 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
         metrics['StS -> Appt %'] = (reached_appt / reached_sts) if reached_sts > 0 else 0
         metrics['Appt -> ICF %'] = (reached_icf / reached_appt) if reached_appt > 0 else 0
             
-        # Lag Times
         def calculate_avg_lag(df, col_from, col_to):
-            if not col_from or not col_to or col_from not in df or col_to not in df: return np.nan
+            # Ensure cols exist and are datetime
+            if not col_from or not col_to or col_from not in df or col_to not in df \
+               or not pd.api.types.is_datetime64_any_dtype(df[col_from]) \
+               or not pd.api.types.is_datetime64_any_dtype(df[col_to]): 
+                   return np.nan
             valid_df = df.dropna(subset=[col_from, col_to])
             if valid_df.empty: return np.nan
-            diff = valid_df[col_to] - valid_df[col_from]; diff_positive = diff[diff >= pd.Timedelta(days=0)] # Allow zero lag
+            diff = valid_df[col_to] - valid_df[col_from]; diff_positive = diff[diff >= pd.Timedelta(days=0)] 
             if diff_positive.empty: return np.nan
             return diff_positive.mean().total_seconds() / (60*60*24)
-        metrics['Lag Qual -> ICF (Days)'] = calculate_avg_lag(group, ts_qual_col, ts_icf_col) # Overall lag
+        metrics['Lag Qual -> ICF (Days)'] = calculate_avg_lag(group, ts_qual_col, ts_icf_col) 
 
-        # Advanced Metrics
         ttc_times = []; funnel_movement_steps = []
-        sent_to_site_group = group.dropna(subset=[ts_sts_col]) if ts_sts_col else pd.DataFrame() # Ensure empty df if no StS
-        if not sent_to_site_group.empty and 'Parsed_Lead_Status_History' in sent_to_site_group:
+        sent_to_site_group = group.dropna(subset=[ts_sts_col]) if ts_sts_col and ts_sts_col in group else pd.DataFrame()
+        
+        parsed_status_col = f"Parsed_Lead_Status_History" # Assuming this name convention
+        parsed_stage_col = f"Parsed_Lead_Stage_History"
+
+        if not sent_to_site_group.empty and parsed_status_col in sent_to_site_group:
             for idx, row in sent_to_site_group.iterrows():
                 ts_sent = row[ts_sts_col]; first_contact_ts = pd.NaT
-                if row['Parsed_Lead_Status_History']:
-                    for status_name, event_dt in row['Parsed_Lead_Status_History']:
-                        if status_name in site_contact_attempt_statuses and event_dt >= ts_sent:
+                history_list = row.get(parsed_status_col, [])
+                if history_list: # Check if list is not None or empty
+                    for status_name, event_dt in history_list:
+                        if status_name in site_contact_attempt_statuses and pd.notna(event_dt) and pd.notna(ts_sent) and event_dt >= ts_sent:
                             first_contact_ts = event_dt; break
-                if pd.notna(first_contact_ts):
+                if pd.notna(first_contact_ts) and pd.notna(ts_sent):
                     time_diff = first_contact_ts - ts_sent
                     if time_diff >= pd.Timedelta(0): ttc_times.append(time_diff.total_seconds() / (60*60*24))                 
+                
                 stages_reached_post_sts = set()
-                if 'Parsed_Lead_Stage_History' in row and row['Parsed_Lead_Stage_History']:
-                    for stage_name, event_dt in row['Parsed_Lead_Stage_History']:
-                        if stage_name in post_sts_progress_stages and event_dt > ts_sent: stages_reached_post_sts.add(stage_name)
+                stage_history_list = row.get(parsed_stage_col, [])
+                if stage_history_list and pd.notna(ts_sent): 
+                     for stage_name, event_dt in stage_history_list:
+                         if stage_name in post_sts_progress_stages and pd.notna(event_dt) and event_dt > ts_sent: stages_reached_post_sts.add(stage_name)
                 funnel_movement_steps.append(len(stages_reached_post_sts))
+
         metrics['Avg TTC (Days)'] = np.mean(ttc_times) if ttc_times else np.nan
         metrics['Avg Funnel Movement Steps'] = np.mean(funnel_movement_steps) if funnel_movement_steps else 0
         
-        # Screen Fail Rate
-        site_sfs = group[ts_sf_col].notna().sum() if ts_sf_col else 0
-        metrics['Site Screen Fail %'] = (site_sfs / reached_icf) if reached_icf > 0 else 0.0 # Treat rate as 0 if no ICFs
+        site_sfs = group[ts_sf_col].notna().sum() if ts_sf_col and ts_sf_col in group else 0
+        metrics['Site Screen Fail %'] = (site_sfs / reached_icf) if reached_icf > 0 else 0.0 
         
         site_metrics_list.append(metrics)
 
     site_metrics_df = pd.DataFrame(site_metrics_list)
-    st.success("Site metrics calculated.")
+    # st.success("Site metrics calculated.") # Reduce success messages
     return site_metrics_df 
 
-# @st.cache_data # Avoid caching until logic is stable
+# @st.cache_data 
 def score_sites(_site_metrics_df, weights):
     """Applies normalization and weighting to score sites."""
-    st.write("Applying site scoring...") # Progress indicator
+    # st.write("Applying site scoring...") # Reduce messages
     if _site_metrics_df is None or _site_metrics_df.empty:
         st.warning("Cannot score sites: No site metrics available.")
         return pd.DataFrame()
         
-    site_metrics_df = _site_metrics_df.copy() # Work on copy
+    site_metrics_df = _site_metrics_df.copy() 
     
-    # Metrics to use for scoring (match keys in weights)
     metrics_to_scale = list(weights.keys())
     lower_is_better = ["Avg TTC (Days)", "Site Screen Fail %"]
 
     # Ensure all required columns exist, fill NaN appropriately before scaling
     for col in metrics_to_scale:
         if col not in site_metrics_df.columns:
-            st.warning(f"Metric column '{col}' needed for scoring not found. Assigning 0.")
-            site_metrics_df[col] = 0 # Add column with 0 if missing
+            st.warning(f"Metric column '{col}' needed for scoring not found. Adding with 0/default.")
+            site_metrics_df[col] = 0 if col not in lower_is_better else np.nan # Assign default based on metric type
         
-        # Fill NaNs based on whether lower is better
         if col in lower_is_better:
-            # Fill NaN TTC/SFR with a high value (e.g., max observed + buffer or a reasonable large number)
             max_val = site_metrics_df[col].max()
-            fill_val = max_val + 1 if pd.notna(max_val) else 999 # Default high if no non-NaN values
+            fill_val = max_val + 1 if pd.notna(max_val) else 999 
             site_metrics_df[col].fillna(fill_val, inplace=True)
         else:
-            # Fill NaN for rates/steps (higher is better) with 0
             site_metrics_df[col].fillna(0, inplace=True)
 
-    # Check if any metrics have zero variance (all sites same value)
-    # Add small noise to prevent NaN during scaling if needed, or handle in scaler
-    scaled_metrics = pd.DataFrame(index=site_metrics_df.index) # Initialize scaled df
-    for col in metrics_to_scale:
-         if site_metrics_df[col].min() == site_metrics_df[col].max():
-             # Handle zero variance: assign neutral score (0.5) or skip scaling for this metric
-             scaled_metrics[col] = 0.5 
-             st.caption(f"Note: Metric '{col}' has same value for all sites; contributing neutral score.")
-         else:
-             scaler = MinMaxScaler()
-             # Reshape needed for single column scaling
-             scaled_values = scaler.fit_transform(site_metrics_df[[col]]) 
-             scaled_metrics[col] = scaled_values.flatten() # Store scaled values (0-1)
+    # Normalize using Min-Max Scaler if data exists and varies
+    scaled_metrics = pd.DataFrame(index=site_metrics_df.index) 
+    if not site_metrics_df.empty and len(site_metrics_df) > 1: # Need >1 site for scaling
+        for col in metrics_to_scale:
+             if col in site_metrics_df.columns: # Check column exists after potential add
+                 if site_metrics_df[col].min() == site_metrics_df[col].max():
+                     scaled_metrics[col] = 0.5 
+                     # st.caption(f"Note: Metric '{col}' has same value for all sites.")
+                 else:
+                     scaler = MinMaxScaler()
+                     scaled_values = scaler.fit_transform(site_metrics_df[[col]]) 
+                     scaled_metrics[col] = scaled_values.flatten() 
+             else: # Should not happen if handled above, but safety check
+                  scaled_metrics[col] = 0.5 # Assign neutral if column somehow missing
 
-    # Invert scales for 'lower is better' metrics
-    for col in lower_is_better:
-        if col in scaled_metrics.columns:
-            scaled_metrics[col] = 1 - scaled_metrics[col]
+        for col in lower_is_better:
+            if col in scaled_metrics.columns:
+                scaled_metrics[col] = 1 - scaled_metrics[col]
+
+    elif not site_metrics_df.empty: # Handle case with only 1 site
+         for col in metrics_to_scale: scaled_metrics[col] = 0.5 # Assign neutral score if only one site
 
     # Calculate Weighted Score
     site_metrics_df['Score_Raw'] = 0
-    total_weight_used = 0 # Track sum of weights applied
+    total_weight_applied = 0
     for metric, weight in weights.items():
          if metric in scaled_metrics.columns:
-             site_metrics_df['Score_Raw'] += scaled_metrics[metric] * weight
-             total_weight_used += abs(weight) # Use absolute for sum magnitude if using signed weights
+             # Weight should be positive, direction handled by normalization/inversion
+             positive_weight = abs(weight) 
+             site_metrics_df['Score_Raw'] += scaled_metrics[metric] * positive_weight
+             total_weight_applied += positive_weight
              
-    # Scale score to 0-100 based on theoretical min/max or observed range
-    # Using observed range:
-    min_raw_score = site_metrics_df['Score_Raw'].min()
-    max_raw_score = site_metrics_df['Score_Raw'].max()
-    if max_raw_score > min_raw_score:
-         site_metrics_df['Score'] = ((site_metrics_df['Score_Raw'] - min_raw_score) / (max_raw_score - min_raw_score)) * 100
-    elif pd.notna(max_raw_score): # Handle case where all scores are the same
-         site_metrics_df['Score'] = 50.0 # Assign a mid-range score
-    else: # Handle all NaN case
+    # Normalize score based on total weight applied (0-1 range), then scale to 100
+    if total_weight_applied > 0:
+         site_metrics_df['Score'] = (site_metrics_df['Score_Raw'] / total_weight_applied) * 100
+    else: # Handle case where no weights applied or total weight is zero
          site_metrics_df['Score'] = 0.0
+         
+    # Handle potential NaNs in Score if raw score was NaN (unlikely with fillna)
+    site_metrics_df['Score'].fillna(0.0, inplace=True)
 
-    # Assign Grades
+
     def assign_grade(score):
         if pd.isna(score): return 'N/A'
+        score = round(score) # Round score for grading
         if score >= 97: return 'A+'
         elif score >= 90: return 'A'
         elif score >= 87: return 'B+'
@@ -369,34 +373,26 @@ def score_sites(_site_metrics_df, weights):
         else: return 'F'
     site_metrics_df['Grade'] = site_metrics_df['Score'].apply(assign_grade)
 
-    # Prepare final output table
-    site_metrics_df.reset_index(inplace=True) # Ensure 'Site' is a column
     site_metrics_df.sort_values('Score', ascending=False, inplace=True)
-    st.success("Site scoring complete.")
+    # st.success("Site scoring complete.") # Reduce messages
     return site_metrics_df 
 
 # Placeholder - Logic from Turn 40/42 will go here
-# @st.cache_data 
 def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_inputs): 
      st.write("Projection calculation logic to be implemented here.")
-     # Example: Use projection_inputs['spend'], projection_inputs['cpqr'] etc.
-     return pd.DataFrame({'Month': ['Apr-25', 'May-25'],'Projected ICF': [0, 0], 'Info': ['Calculation Pending']}) 
+     return pd.DataFrame({'Month': ['Apr-25', 'May-25'],'Projected ICF': [0, 0], 'Info': ['Calc Pending']}) 
 
 
 # --- Streamlit UI ---
-
-# Sidebar for Inputs
 with st.sidebar:
     st.header("⚙️ Setup")
-    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV/TSV)", type=["csv", "tsv"], key="referral_uploader")
-    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv", "csv"], key="funnel_uploader") 
+    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader")
+    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv"], key="funnel_uploader") 
     st.divider()
-    
-    # --- Inputs for Calculations ---
     st.subheader("Historical Ad Spend (Monthly)")
     st.info("Enter **historical** spend for past months found in data.")
-    # TODO: Make this section dynamic based on data
     ad_spend_input_dict_manual = {}
+    # Example inputs - Needs dynamic generation based on data
     spend_month_str_1 = st.text_input("Spend Month 1 (YYYY-MM)", "2025-02", key="spend_m1_str")
     spend_val_1 = st.number_input(f"Spend for {spend_month_str_1}", value=45000.0, step=1000.0, format="%.2f", key="spend_v1")
     spend_month_str_2 = st.text_input("Spend Month 2 (YYYY-MM)", "2025-03", key="spend_m2_str")
@@ -406,21 +402,18 @@ with st.sidebar:
     except Exception: st.warning(f"Invalid format for Month 1")
     try: ad_spend_input_dict[pd.Period(spend_month_str_2, freq='M')] = spend_val_2
     except Exception: st.warning(f"Invalid format for Month 2")
-    st.caption("Note: Ad Spend input currently supports only 2 months.")
-
+    st.caption("Ad Spend input method needs improvement.")
     st.divider()
     st.subheader("Site Scoring Weights")
-    weights = {}
+    weights = {} # Use user input weights
     weights["Qual -> ICF %"] = st.slider("Weight: Qualified -> ICF %", 0, 100, 20, key='w_qicf') / 100.0
-    weights["Avg TTC (Days)"] = st.slider("Weight: Avg Time to Contact (Lower Better)", 0, 100, 25, key='w_ttc') / 100.0 # Keep positive, inversion handled in score_sites
+    weights["Avg TTC (Days)"] = st.slider("Weight: Avg Time to Contact (Lower Better)", 0, 100, 25, key='w_ttc') / 100.0 
     weights["Avg Funnel Movement Steps"] = st.slider("Weight: Avg Funnel Movement Steps", 0, 100, 5, key='w_fms') / 100.0
-    weights["Site Screen Fail %"] = st.slider("Weight: Site Screen Fail % (Lower Better)", 0, 100, 5, key='w_sfr') / 100.0 # Keep positive
+    weights["Site Screen Fail %"] = st.slider("Weight: Site Screen Fail % (Lower Better)", 0, 100, 5, key='w_sfr') / 100.0 
     weights["StS -> Appt %"] = st.slider("Weight: StS -> Appt Sched %", 0, 100, 30, key='w_sa') / 100.0
     weights["Appt -> ICF %"] = st.slider("Weight: Appt Sched -> ICF %", 0, 100, 15, key='w_ai') / 100.0
-    
-    total_weight = sum(weights.values())
-    st.caption(f"Current Total Weight: {total_weight*100:.0f}%")
-    # Note: Weights don't strictly need to sum to 100 as score is rescaled, but it helps conceptually.
+    total_weight_disp = sum(abs(w) for w in weights.values()) # Sum absolute values for display if using signed weights conceptually
+    st.caption(f"Current Total Weight Magnitude: {total_weight_disp*100:.0f}%")
 
 
 # --- Main App Logic & Display ---
@@ -429,7 +422,6 @@ funnel_definition, ordered_stages, ts_col_map = None, None, None
 
 if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
     funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
-
     if funnel_definition and ordered_stages and ts_col_map: 
         try:
              bytes_data = uploaded_referral_file.getvalue()
@@ -437,23 +429,19 @@ if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
              except UnicodeDecodeError: decoded_data = bytes_data.decode("latin-1") 
              stringio = io.StringIO(decoded_data)
              try:
-                  # Assuming CSV based on last successful run
+                  # Use COMMA separator based on last successful run
                   referrals_raw_df = pd.read_csv(stringio, sep=',', header=0, on_bad_lines='warn', low_memory=False) 
-                  # DEBUG LINE REMOVED: st.write("Columns found by pandas:", referrals_raw_df.columns.tolist()) 
                   st.success("Referral Data Loaded (assuming CSV with header).")
                   referral_data_processed = preprocess_referral_data(referrals_raw_df, funnel_definition, ordered_stages, ts_col_map)
              except Exception as read_err:
                   st.error(f"Error reading referral file (assuming CSV, header=0): {read_err}")
-        except Exception as e:
-             st.error(f"An unexpected error occurred during referral data loading: {e}")
+        except Exception as e: st.error(f"An unexpected error occurred during data loading: {e}")
 
 # --- Display Sections ---
 if referral_data_processed is not None and not referral_data_processed.empty:
     st.markdown("---")
     st.success("Data loaded and preprocessed. Displaying analysis sections.") 
-    
     tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
-
     with tab1:
         st.header("Monthly ProForma (Historical Cohorts)")
         st.write("Shows historical performance based on the month referrals were submitted.")
@@ -472,70 +460,42 @@ if referral_data_processed is not None and not referral_data_processed.empty:
                  st.download_button(label="Download ProForma Data as CSV", data=csv, file_name='monthly_proforma.csv', mime='text/csv', key='download_proforma')
             except Exception as e: st.warning(f"Could not generate download button: {e}")
         else: st.warning("Could not generate ProForma table.")
-
     with tab2:
         st.header("Site Performance Ranking")
         st.write("Calculates metrics and scores for each site based on weights set in sidebar.")
-        
-        # Calculate Site Metrics (cached if underlying data doesn't change)
-        # Consider caching calculate_site_metrics if _processed_df doesn't change
         site_metrics_calculated = calculate_site_metrics(referral_data_processed, ordered_stages, ts_col_map) 
-        
         if not site_metrics_calculated.empty:
-            # Score Sites using weights from sidebar
-            # Note: score_sites function applies MinMax scaling etc.
+            # Pass weights collected from sidebar sliders
             ranked_sites_df = score_sites(site_metrics_calculated, weights) 
-            
             st.subheader("Site Ranking")
-            # Select and format columns for display
-            display_cols = ['Site', 'Score', 'Grade', 'Total Qualified', 'Qual -> ICF %', 'Avg TTC (Days)', 
-                            'Avg Funnel Movement Steps', 'StS -> Appt %', 'Appt -> ICF %', 'Site Screen Fail %']
-            display_cols = [col for col in display_cols if col in ranked_sites_df.columns] # Ensure columns exist
+            display_cols = ['Site', 'Score', 'Grade', 'Total Qualified', 'Qual -> ICF %', 'Avg TTC (Days)', 'Avg Funnel Movement Steps', 'StS -> Appt %', 'Appt -> ICF %', 'Site Screen Fail %']
+            display_cols = [col for col in ranked_sites_df.columns if col in display_cols] # Select display cols that exist
             final_ranked_display = ranked_sites_df[display_cols].copy()
-
             # Formatting
             final_ranked_display['Score'] = final_ranked_display['Score'].round(1)
             percent_cols = [col for col in final_ranked_display.columns if '%' in col]
             lag_cols = [col for col in final_ranked_display.columns if 'TTC' in col]
             step_cols = [col for col in final_ranked_display.columns if 'Steps' in col]
-            
             for col in percent_cols: final_ranked_display[col] = final_ranked_display[col].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
             for col in lag_cols: final_ranked_display[col] = final_ranked_display[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
             for col in step_cols: final_ranked_display[col] = final_ranked_display[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
-            
             st.dataframe(final_ranked_display.style.format(na_rep='-'))
-
-            # Add download button
             try:
                  csv_sites = final_ranked_display.to_csv(index=False).encode('utf-8')
                  st.download_button(label="Download Site Ranking Data as CSV", data=csv_sites, file_name='site_ranking.csv', mime='text/csv', key='download_sites')
             except Exception as e: st.warning(f"Could not generate site download button: {e}")
-
-        else:
-            st.warning("Could not calculate site metrics to display ranking.")
-
-
+        else: st.warning("Could not calculate site metrics to display ranking.")
     with tab3:
         st.header("Projections")
         st.write("Forecasts future performance based on assumptions.")
         st.info("Projection calculation logic needs to be implemented.")
-        
-        # --- Add Projection Inputs to Sidebar ---
-        # Example:
-        # with st.sidebar:
-        #    st.divider()
-        #    st.subheader("Projection Assumptions")
-        #    proj_horizon = st.slider("Projection Horizon (Months)", 1, 24, 12)
-        #    proj_cpqr = st.number_input("Assumed CPQR ($)", value=120.0, step=10.0)
-        #    # Add inputs for future spend, conversion rates etc.
-
         # --- Call projection function (when implemented) ---
-        # projection_inputs = { 'horizon': proj_horizon, 'cpqr': proj_cpqr, ... } 
-        # projected_icfs = calculate_projections(referral_data_processed, ordered_stages, ts_col_map, projection_inputs)
+        # Placeholder inputs
+        projection_inputs_example = { 'horizon': 12, 'spend': {1: 20000}, 'cpqr': 120, 'conv_rates':{}} 
+        # projected_icfs = calculate_projections(referral_data_processed, ordered_stages, ts_col_map, projection_inputs_example)
         # st.dataframe(projected_icfs)
-
-        # Placeholder display
-        st.dataframe(pd.DataFrame({'Month': ['Apr-25', 'May-25'],'Info': ['Calculation Pending']}))
+        # Use CORRECTED placeholder display
+        st.dataframe(pd.DataFrame({'Month': ['Apr-25', 'May-25', 'Jun-25'],'Info': ['Calculation Pending','Calculation Pending', 'Calculation Pending']})) 
 
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
