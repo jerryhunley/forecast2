@@ -127,3 +127,348 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
     parsed_stage_hist_col = parsed_cols.get('Lead Stage History'); parsed_status_hist_col = parsed_cols.get('Lead Status History')
     if not parsed_stage_hist_col and not parsed_status_hist_col:
         if 'Lead Stage History' not in df.columns and 'Lead Status History' not in df.columns: st.error("Neither history column found.")
+        else: st.error("History columns failed to parse for timestamps.")
+        return None 
+    timestamp_cols_df = df.apply(lambda row: get_stage_timestamps(row, parsed_stage_hist_col, parsed_status_hist_col, funnel_def, ordered_stages, ts_col_map), axis=1)
+    old_ts_cols = [col for col in df.columns if col.startswith('TS_')]; df.drop(columns=old_ts_cols, inplace=True, errors='ignore')
+    df = pd.concat([df, timestamp_cols_df], axis=1)
+    for stage, ts_col in ts_col_map.items():
+         if ts_col in df.columns: df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce') 
+    st.success("Referral Data Preprocessed Successfully.")
+    return df
+
+# --- Calculation Functions for App Sections ---
+
+# @st.cache_data 
+def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
+    """ Calculates historical monthly cohort metrics."""
+    if _processed_df is None or _processed_df.empty: return pd.DataFrame()
+    if not isinstance(monthly_ad_spend_input, dict): return pd.DataFrame()
+    if "Submission_Month" not in _processed_df.columns: return pd.DataFrame()
+    processed_df = _processed_df.copy() 
+    try:
+        cohort_summary = processed_df.groupby("Submission_Month").size().reset_index(name="Total Qualified Referrals")
+        cohort_summary = cohort_summary.set_index("Submission_Month")
+        cohort_summary["Ad Spend"] = cohort_summary.index.map(monthly_ad_spend_input).fillna(0) 
+        reached_stage_cols_map = {}
+        for stage_name in ordered_stages:
+            ts_col = ts_col_map.get(stage_name)
+            if ts_col and ts_col in processed_df.columns:
+                reached_col_cleaned = f"Reached_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
+                reached_stage_cols_map[stage_name] = reached_col_cleaned
+                if pd.api.types.is_datetime64_any_dtype(processed_df[ts_col]):
+                     reached_stage_count = processed_df.dropna(subset=[ts_col]).groupby("Submission_Month").size()
+                     cohort_summary[reached_col_cleaned] = reached_stage_count
+                else: cohort_summary[reached_col_cleaned] = 0
+        cohort_summary = cohort_summary.fillna(0)
+        for col in cohort_summary.columns:
+            if col != "Ad Spend": cohort_summary[col] = cohort_summary[col].astype(int)
+        cohort_summary["Ad Spend"] = cohort_summary["Ad Spend"].astype(float)
+        pof_reached_col = reached_stage_cols_map.get("Passed Online Form")
+        base_count_col = None # Initialize
+        if pof_reached_col and pof_reached_col in cohort_summary.columns:
+            cohort_summary.rename(columns={pof_reached_col: "Pre-Screener Qualified"}, inplace=True, errors='ignore') 
+            base_count_col = "Pre-Screener Qualified"
+        elif "Total Qualified Referrals" in cohort_summary.columns :
+            cohort_summary.rename(columns={"Total Qualified Referrals": "Pre-Screener Qualified"}, inplace=True, errors='ignore')
+            base_count_col = "Pre-Screener Qualified"
+        
+        proforma_metrics = pd.DataFrame(index=cohort_summary.index)
+        if base_count_col and base_count_col in cohort_summary.columns: 
+            proforma_metrics["Ad Spend"] = cohort_summary["Ad Spend"]
+            proforma_metrics["Pre-Screener Qualified"] = cohort_summary[base_count_col]
+            proforma_metrics["Cost per Qualified Pre-screen"] = (cohort_summary["Ad Spend"] / cohort_summary[base_count_col].replace(0, np.nan)).round(2) 
+            for stage_orig, reached_col in reached_stage_cols_map.items():
+                 metric_name = "Pre-Screener Qualified" if stage_orig == "Passed Online Form" else f"Total {stage_orig}"
+                 if reached_col in cohort_summary.columns and metric_name not in proforma_metrics.columns:
+                     proforma_metrics[metric_name] = cohort_summary[reached_col]
+            sts_col = reached_stage_cols_map.get("Sent To Site"); appt_col = reached_stage_cols_map.get("Appointment Scheduled"); icf_col = reached_stage_cols_map.get("Signed ICF")
+            if sts_col in cohort_summary.columns: proforma_metrics["Qualified to StS %"] = (cohort_summary[sts_col] / cohort_summary[base_count_col].replace(0, np.nan))
+            if sts_col in cohort_summary.columns and appt_col in cohort_summary.columns: proforma_metrics["StS to Appt Sched %"] = (cohort_summary[appt_col] / cohort_summary[sts_col].replace(0, np.nan))
+            if appt_col in cohort_summary.columns and icf_col in cohort_summary.columns: proforma_metrics["Appt Sched to ICF %"] = (cohort_summary[icf_col] / cohort_summary[appt_col].replace(0, np.nan))
+            if icf_col in cohort_summary.columns:
+                proforma_metrics["Qualified to ICF %"] = (cohort_summary[icf_col] / cohort_summary[base_count_col].replace(0, np.nan))
+                proforma_metrics["Cost Per ICF"] = (cohort_summary["Ad Spend"] / cohort_summary[icf_col].replace(0, np.nan)).round(2)
+        return proforma_metrics
+    except Exception as e: st.error(f"ProForma Calc Error: {e}"); return pd.DataFrame()
+
+# @st.cache_data 
+def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
+    """Calculates basic and advanced metrics per site."""
+    if _processed_df is None or _processed_df.empty or 'Site' not in _processed_df.columns: return pd.DataFrame() 
+    processed_df = _processed_df.copy(); site_metrics_list = []
+    try: # Wrap calculation in try-except
+        site_groups = processed_df.groupby('Site')
+        qual_stage="Passed Online Form"; sts_stage="Sent To Site"; appt_stage="Appointment Scheduled"; icf_stage="Signed ICF"; sf_stage="Screen Failed"
+        ts_qual_col=ts_col_map.get(qual_stage); ts_sts_col=ts_col_map.get(sts_stage); ts_appt_col=ts_col_map.get(appt_stage); ts_icf_col=ts_col_map.get(icf_stage); ts_sf_col=ts_col_map.get(sf_stage)
+        site_contact_attempt_statuses = ["Site Contact Attempt 1"]; post_sts_progress_stages = ["Appointment Scheduled", "Signed ICF", "Enrolled", "Screen Failed"] 
+        required_ts_cols = [ts_qual_col, ts_sts_col, ts_appt_col, ts_icf_col, ts_sf_col]
+        for col in required_ts_cols:
+            if col and col not in processed_df.columns: processed_df[col] = pd.NaT; processed_df[col] = pd.to_datetime(processed_df[col], errors='coerce')
+        for site_name, group in site_groups:
+            metrics = {'Site': site_name}; metrics['Total Qualified'] = group.shape[0] 
+            reached_sts = group[ts_sts_col].notna().sum() if ts_sts_col else 0
+            reached_appt = group[ts_appt_col].notna().sum() if ts_appt_col else 0
+            reached_icf = group[ts_icf_col].notna().sum() if ts_icf_col else 0
+            metrics['Reached StS'] = reached_sts; metrics['Reached Appt'] = reached_appt; metrics['Reached ICF'] = reached_icf # Store counts
+            total_qual=metrics['Total Qualified']
+            metrics['Qual -> ICF %'] = (reached_icf / total_qual) if total_qual > 0 else 0.0
+            metrics['StS -> Appt %'] = (reached_appt / reached_sts) if reached_sts > 0 else 0.0
+            metrics['Appt -> ICF %'] = (reached_icf / reached_appt) if reached_appt > 0 else 0.0
+            def calculate_avg_lag(df, col_from, col_to):
+                if not col_from or not col_to or col_from not in df or col_to not in df or not pd.api.types.is_datetime64_any_dtype(df[col_from]) or not pd.api.types.is_datetime64_any_dtype(df[col_to]): return np.nan
+                valid_df = df.dropna(subset=[col_from, col_to]);
+                if valid_df.empty: return np.nan
+                diff = valid_df[col_to] - valid_df[col_from]; diff_positive = diff[diff >= pd.Timedelta(days=0)] 
+                if diff_positive.empty: return np.nan
+                return diff_positive.mean().total_seconds() / (60*60*24)
+            metrics['Lag Qual -> ICF (Days)'] = calculate_avg_lag(group, ts_qual_col, ts_icf_col) 
+            ttc_times = []; funnel_movement_steps = []
+            sent_to_site_group = group.dropna(subset=[ts_sts_col]) if ts_sts_col and ts_sts_col in group else pd.DataFrame()
+            parsed_status_col = f"Parsed_Lead_Status_History"; parsed_stage_col = f"Parsed_Lead_Stage_History"
+            if not sent_to_site_group.empty and parsed_status_col in sent_to_site_group:
+                for idx, row in sent_to_site_group.iterrows():
+                    ts_sent = row[ts_sts_col]; first_contact_ts = pd.NaT
+                    history_list = row.get(parsed_status_col, [])
+                    if history_list: 
+                        for status_name, event_dt in history_list:
+                            if status_name in site_contact_attempt_statuses and pd.notna(event_dt) and pd.notna(ts_sent) and event_dt >= ts_sent:
+                                first_contact_ts = event_dt; break
+                    if pd.notna(first_contact_ts) and pd.notna(ts_sent):
+                        time_diff = first_contact_ts - ts_sent
+                        if time_diff >= pd.Timedelta(0): ttc_times.append(time_diff.total_seconds() / (60*60*24))                 
+                    stages_reached_post_sts = set()
+                    stage_history_list = row.get(parsed_stage_col, [])
+                    if stage_history_list and pd.notna(ts_sent): 
+                         for stage_name, event_dt in stage_history_list:
+                             if stage_name in post_sts_progress_stages and pd.notna(event_dt) and event_dt > ts_sent: stages_reached_post_sts.add(stage_name)
+                    funnel_movement_steps.append(len(stages_reached_post_sts))
+            metrics['Avg TTC (Days)'] = np.mean(ttc_times) if ttc_times else np.nan
+            metrics['Avg Funnel Movement Steps'] = np.mean(funnel_movement_steps) if funnel_movement_steps else 0
+            site_sfs = group[ts_sf_col].notna().sum() if ts_sf_col and ts_sf_col in group else 0
+            metrics['Site Screen Fail %'] = (site_sfs / reached_icf) if reached_icf > 0 else 0.0 
+            site_metrics_list.append(metrics)
+        site_metrics_df = pd.DataFrame(site_metrics_list)
+        # st.success("Site metrics calculated.") 
+        return site_metrics_df 
+    except Exception as e:
+        st.error(f"Error calculating site metrics: {e}")
+        return pd.DataFrame()
+
+
+# @st.cache_data 
+def score_sites(_site_metrics_df, weights):
+    """Applies normalization and weighting to score sites using percentile grading."""
+    if _site_metrics_df is None or _site_metrics_df.empty: return pd.DataFrame()
+    try: # Wrap in try-except
+        site_metrics_df = _site_metrics_df.copy().set_index('Site') 
+        metrics_to_scale = list(weights.keys())
+        lower_is_better = ["Avg TTC (Days)", "Site Screen Fail %"]
+
+        for col in metrics_to_scale:
+            if col not in site_metrics_df.columns:
+                st.warning(f"Metric column '{col}' for scoring not found. Adding default.")
+                site_metrics_df[col] = 0 if col not in lower_is_better else np.nan 
+            if col in lower_is_better:
+                max_val = site_metrics_df[col].max(); fill_val = max_val + 1 if pd.notna(max_val) and max_val > 0 else 999 
+                site_metrics_df[col].fillna(fill_val, inplace=True)
+            else: site_metrics_df[col].fillna(0, inplace=True)
+
+        scaled_metrics = pd.DataFrame(index=site_metrics_df.index) 
+        if not site_metrics_df.empty and len(site_metrics_df) > 0: 
+            for col in metrics_to_scale:
+                 if col in site_metrics_df.columns: 
+                     min_val = site_metrics_df[col].min(); max_val = site_metrics_df[col].max()
+                     if min_val == max_val: scaled_metrics[col] = 0.5 
+                     else:
+                         scaler = MinMaxScaler()
+                         scaled_values = scaler.fit_transform(site_metrics_df[[col]]) 
+                         scaled_metrics[col] = scaled_values.flatten() 
+                 else: scaled_metrics[col] = 0.5 
+            for col in lower_is_better:
+                if col in scaled_metrics.columns: scaled_metrics[col] = 1 - scaled_metrics[col]
+        elif not site_metrics_df.empty: 
+             for col in metrics_to_scale: scaled_metrics[col] = 0.5 
+
+        site_metrics_df['Score_Raw'] = 0; total_weight_applied = 0
+        for metric, weight in weights.items():
+             if metric in scaled_metrics.columns:
+                 positive_weight = abs(weight) 
+                 site_metrics_df['Score_Raw'] += scaled_metrics[metric] * positive_weight
+                 total_weight_applied += positive_weight
+                 
+        if total_weight_applied > 0: site_metrics_df['Score'] = (site_metrics_df['Score_Raw'] / total_weight_applied) * 100
+        else: site_metrics_df['Score'] = 0.0
+        site_metrics_df['Score'].fillna(0.0, inplace=True)
+
+        if len(site_metrics_df) > 1: 
+            site_metrics_df['Score_Rank_Percentile'] = site_metrics_df['Score'].rank(pct=True)
+            bins = [0, 0.10, 0.25, 0.60, 0.85, 1.0]; labels = ['F', 'D', 'C', 'B', 'A']
+            # Use qcut for percentile bins if score variance exists, otherwise fallback
+            try:
+                 site_metrics_df['Grade'] = pd.qcut(site_metrics_df['Score_Rank_Percentile'], q=bins, labels=labels, duplicates='drop')
+            except ValueError: # Handle cases with too few bins or duplicates
+                 st.warning("Could not create percentile bins for grading due to score distribution, using simpler rank.")
+                 # Fallback: Assign grade based on rank position maybe? Or just use score ranges.
+                 # For simplicity, let's use score ranges as a fallback here.
+                 def assign_grade_fallback(score):
+                     if pd.isna(score): return 'N/A'
+                     if score >= 90: return 'A' # Simplified A/B/C/D/F based on score
+                     elif score >= 80: return 'B'
+                     elif score >= 70: return 'C'
+                     elif score >= 60: return 'D'
+                     else: return 'F'
+                 site_metrics_df['Grade'] = site_metrics_df['Score'].apply(assign_grade_fallback)
+                 
+            site_metrics_df['Grade'] = site_metrics_df['Grade'].astype(str).replace('nan', 'N/A') 
+        elif len(site_metrics_df) == 1: site_metrics_df['Grade'] = 'N/A' 
+        else: site_metrics_df['Grade'] = []
+
+        site_metrics_df.reset_index(inplace=True); site_metrics_df.sort_values('Score', ascending=False, inplace=True)
+        # st.success("Site scoring complete.") 
+        return site_metrics_df 
+    except Exception as e:
+        st.error(f"Error during Site Scoring: {e}")
+        # Return original metrics df if scoring fails
+        return _site_metrics_df.reset_index() if _site_metrics_df is not None else pd.DataFrame()
+
+
+# Placeholder - Logic from Turn 40/42 will go here
+def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_inputs): 
+     st.write("Projection calculation logic to be implemented here.")
+     return pd.DataFrame({'Month': ['Apr-25', 'May-25'],'Projected ICF': [0, 0], 'Info': ['Calculation Pending']}) 
+
+
+# --- Streamlit UI ---
+with st.sidebar:
+    st.header("⚙️ Setup")
+    uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader")
+    uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv"], key="funnel_uploader") 
+    st.divider()
+    st.subheader("Historical Ad Spend (Monthly)")
+    st.info("Enter **historical** spend for past months found in data.")
+    ad_spend_input_dict_manual = {}
+    spend_month_str_1 = st.text_input("Spend Month 1 (YYYY-MM)", "2025-02", key="spend_m1_str")
+    spend_val_1 = st.number_input(f"Spend for {spend_month_str_1}", value=45000.0, step=1000.0, format="%.2f", key="spend_v1")
+    spend_month_str_2 = st.text_input("Spend Month 2 (YYYY-MM)", "2025-03", key="spend_m2_str")
+    spend_val_2 = st.number_input(f"Spend for {spend_month_str_2}", value=60000.0, step=1000.0, format="%.2f", key="spend_v2")
+    ad_spend_input_dict = {}
+    try: ad_spend_input_dict[pd.Period(spend_month_str_1, freq='M')] = spend_val_1
+    except Exception: st.warning(f"Invalid format for Month 1")
+    try: ad_spend_input_dict[pd.Period(spend_month_str_2, freq='M')] = spend_val_2
+    except Exception: st.warning(f"Invalid format for Month 2")
+    st.caption("Ad Spend input method needs improvement.")
+    st.divider()
+    st.subheader("Site Scoring Weights (%)") # Changed title slightly
+    weights_input = {} 
+    # Use sidebar inputs to get weights (as percentages)
+    weights_input["Qual -> ICF %"] = st.slider("Qualified -> ICF %", 0, 100, 20, key='w_qicf') 
+    weights_input["Avg TTC (Days)"] = st.slider("Avg Time to Contact", 0, 100, 25, key='w_ttc') 
+    weights_input["Avg Funnel Movement Steps"] = st.slider("Avg Funnel Movement Steps", 0, 100, 5, key='w_fms') 
+    weights_input["Site Screen Fail %"] = st.slider("Site Screen Fail %", 0, 100, 5, key='w_sfr') 
+    weights_input["StS -> Appt %"] = st.slider("StS -> Appt Sched %", 0, 100, 30, key='w_sa') 
+    weights_input["Appt -> ICF %"] = st.slider("Appt Sched -> ICF %", 0, 100, 15, key='w_ai') 
+    
+    # Convert percentages to decimals for calculation, handle potential 0 total weight
+    total_weight_input = sum(abs(w) for w in weights_input.values()) 
+    if total_weight_input > 0:
+        weights_normalized = {k: v / total_weight_input for k, v in weights_input.items()}
+    else:
+        weights_normalized = {k: 0 for k in weights_input} # Use zero weights if sum is zero
+    st.caption(f"Weights are normalized. Lower is better for TTC & Screen Fail %.")
+
+
+# --- Main App Logic & Display ---
+referral_data_processed = None 
+funnel_definition, ordered_stages, ts_col_map = None, None, None 
+
+if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
+    funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
+    if funnel_definition and ordered_stages and ts_col_map: 
+        try:
+             bytes_data = uploaded_referral_file.getvalue()
+             try: decoded_data = bytes_data.decode("utf-8")
+             except UnicodeDecodeError: decoded_data = bytes_data.decode("latin-1") 
+             stringio = io.StringIO(decoded_data)
+             try:
+                  referrals_raw_df = pd.read_csv(stringio, sep=',', header=0, on_bad_lines='warn', low_memory=False) 
+                  st.success("Referral Data Loaded (assuming CSV with header).")
+                  referral_data_processed = preprocess_referral_data(referrals_raw_df, funnel_definition, ordered_stages, ts_col_map)
+             except Exception as read_err:
+                  st.error(f"Error reading referral file (assuming CSV, header=0): {read_err}")
+        except Exception as e: st.error(f"An unexpected error occurred during data loading: {e}")
+
+# --- Display Sections ---
+if referral_data_processed is not None and not referral_data_processed.empty:
+    st.markdown("---")
+    st.success("Data loaded and preprocessed. Displaying analysis sections.") 
+    tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
+    with tab1:
+        st.header("Monthly ProForma (Historical Cohorts)")
+        st.write("Shows historical performance based on the month referrals were submitted.")
+        proforma_df = calculate_proforma_metrics(referral_data_processed, ordered_stages, ts_col_map, ad_spend_input_dict) 
+        if not proforma_df.empty:
+            proforma_display = proforma_df.transpose()
+            proforma_display.columns = [str(col) for col in proforma_display.columns] 
+            format_dict = {}
+            for idx in proforma_display.index:
+                 if 'Cost' in idx or 'Spend' in idx: format_dict[idx] = "${:,.2f}"
+                 elif '%' in idx: format_dict[idx] = "{:.1%}"
+                 elif 'Total' in idx or 'Qualified' in idx or 'Reached' in idx: format_dict[idx] = "{:,.0f}"
+            st.dataframe(proforma_display.style.format(format_dict, na_rep='-'))
+            try:
+                 csv = proforma_df.reset_index().to_csv(index=False).encode('utf-8')
+                 st.download_button(label="Download ProForma Data as CSV", data=csv, file_name='monthly_proforma.csv', mime='text/csv', key='download_proforma')
+            except Exception as e: st.warning(f"Could not generate download button: {e}")
+        else: st.warning("Could not generate ProForma table.")
+    with tab2:
+        st.header("Site Performance Ranking")
+        st.write("Calculates metrics and scores for each site based on weights set in sidebar.")
+        site_metrics_calculated = calculate_site_metrics(referral_data_processed, ordered_stages, ts_col_map) 
+        if not site_metrics_calculated.empty:
+            # Pass weights collected from sidebar sliders (use normalized version)
+            ranked_sites_df = score_sites(site_metrics_calculated, weights_normalized) 
+            st.subheader("Site Ranking")
+            
+            # --- MODIFIED display_cols list ---
+            display_cols = [
+                'Site', 'Score', 'Grade', 
+                'Total Qualified', 'Reached StS', 'Reached Appt', 'Reached ICF', # Added counts
+                'Qual -> ICF %', 'Avg TTC (Days)', 'Avg Funnel Movement Steps', 
+                'StS -> Appt %', 'Appt -> ICF %', 'Site Screen Fail %'
+                ]
+            # --- END MODIFIED list ---
+            
+            display_cols = [col for col in ranked_sites_df.columns if col in display_cols] # Filter missing cols
+            final_ranked_display = ranked_sites_df[display_cols].copy()
+            
+            # Formatting
+            final_ranked_display['Score'] = final_ranked_display['Score'].round(1)
+            percent_cols = [col for col in final_ranked_display.columns if '%' in col]
+            lag_cols = [col for col in final_ranked_display.columns if 'TTC' in col]
+            step_cols = [col for col in final_ranked_display.columns if 'Steps' in col]
+            count_cols = ['Total Qualified', 'Reached StS', 'Reached Appt', 'Reached ICF'] # Columns to format as int
+
+            for col in percent_cols: final_ranked_display[col] = final_ranked_display[col].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '-')
+            for col in lag_cols: final_ranked_display[col] = final_ranked_display[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
+            for col in step_cols: final_ranked_display[col] = final_ranked_display[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) else '-')
+            for col in count_cols: 
+                if col in final_ranked_display.columns: # Check if count column exists
+                     final_ranked_display[col] = final_ranked_display[col].apply(lambda x: f"{int(x):,}" if pd.notna(x) else '-')
+
+
+            st.dataframe(final_ranked_display.style.format(na_rep='-'))
+            try:
+                 csv_sites = final_ranked_display.to_csv(index=False).encode('utf-8')
+                 st.download_button(label="Download Site Ranking Data as CSV", data=csv_sites, file_name='site_ranking.csv', mime='text/csv', key='download_sites')
+            except Exception as e: st.warning(f"Could not generate site download button: {e}")
+        else: st.warning("Could not calculate site metrics to display ranking.")
+    with tab3:
+        st.header("Projections")
+        st.write("Forecasts future performance based on assumptions.")
+        st.info("Projection calculation logic needs to be implemented.")
+        # Placeholder display
+        st.dataframe(pd.DataFrame({'Month': ['Apr-25', 'May-25', 'Jun-25'],'Info': ['Calculation Pending','Calculation Pending', 'Calculation Pending']})) 
+
+elif not uploaded_referral_file or not uploaded_funnel_def_file:
+    st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
