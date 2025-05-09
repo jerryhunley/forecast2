@@ -114,7 +114,7 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
     df = pd.concat([df, timestamp_cols_df], axis=1)
     for stage, ts_col in ts_col_map.items():
          if ts_col in df.columns: df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce') 
-    # st.success("Referral Data Preprocessed Successfully.") # Reduce messages for main runs
+    # st.success("Referral Data Preprocessed Successfully.")
     # st.write("DEBUG: Exiting preprocess_referral_data successfully")
     return df
 
@@ -173,7 +173,7 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
         # st.write("DEBUG: Exiting calculate_proforma_metrics successfully")
         return proforma_metrics
     except Exception as e: 
-        st.error(f"ProForma Calc Error: {e}"); st.exception(e) # Print full traceback
+        st.error(f"ProForma Calc Error: {e}"); st.exception(e) 
         return pd.DataFrame() # Return empty DataFrame
 
 # @st.cache_data 
@@ -315,8 +315,8 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
     """Calculates projections based on inputs and historical data."""
     
     st.write("DEBUG: Running calculate_projections") 
-    st.write("DEBUG: Projection Inputs Received:", {k:v for k,v in projection_inputs.items() if k != 'spend_dict'}) # Avoid printing large spend dict
-    st.write("DEBUG: Spend Dict Keys (Months):", list(projection_inputs.get('spend_dict', {}).keys()))
+    st.write("DEBUG: Projection Inputs Received:", {k:v for k,v in projection_inputs.items() if k != 'spend_dict'}) 
+    st.write("DEBUG: Spend Dict Keys (Months) for Proj:", list(projection_inputs.get('spend_dict', {}).keys()))
 
 
     if _processed_df is None or _processed_df.empty: st.warning("DEBUG: Proj: No processed data."); return pd.DataFrame()
@@ -351,7 +351,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
              else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
          else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
     else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
-    st.write(f"DEBUG: Overall Lag (Qual->ICF): {lag_results.get(f'{start_stage} -> {end_stage}', 'N/A')} days") # DEBUG
+    st.write(f"DEBUG: Overall Lag (Qual->ICF): {lag_results.get(f'{start_stage} -> {end_stage}', 'N/A')} days") 
 
     projection_conv_rates = {}
     if use_rolling_rates and "Submission_Month" in processed_df.columns:
@@ -386,7 +386,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             else: projection_conv_rates[rate_key] = 0.0 
         if not valid_historical_rates_found: projection_conv_rates = manual_conv_rates 
     else: projection_conv_rates = manual_conv_rates
-    st.write("DEBUG: Rates used for projection:", projection_conv_rates) # DEBUG
+    st.write("DEBUG: Rates used for projection:", projection_conv_rates) 
 
     try:
         last_historical_month = processed_df["Submission_Month"].max() if "Submission_Month" in processed_df and not processed_df["Submission_Month"].empty else pd.Period(datetime.now(), freq='M') - 1
@@ -394,20 +394,28 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         future_months = pd.period_range(start=proj_start_month, periods=horizon, freq='M')
         projection_cohorts = pd.DataFrame(index=future_months)
         projection_cohorts['Forecasted_Ad_Spend'] = [future_spend_dict.get(m, 0) for m in future_months] 
-        projection_cohorts['Forecasted_PSQ'] = (projection_cohorts['Forecasted_Ad_Spend'] / assumed_cpqr).round(0).fillna(0).astype(int)
+        projection_cohorts['Forecasted_PSQ'] = (projection_cohorts['Forecasted_Ad_Spend'] / assumed_cpqr).round(0).fillna(0).astype(int) # Added fillna(0)
         last_stage_proj_col = 'Forecasted_PSQ'; icf_stage_name = "Signed ICF" 
         icf_proj_col = f"Projected_{icf_stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
+        
+        st.write("DEBUG: Initial Forecasted_PSQ head:", projection_cohorts[['Forecasted_PSQ']].head()) # DEBUG
+        
         for i in range(len(ordered_stages) - 1):
             stage_from = ordered_stages[i]; stage_to = ordered_stages[i+1]
             conv_rate = projection_conv_rates.get(f"{stage_from} -> {stage_to}", 0) 
             proj_col_to = f"Projected_{stage_to.replace(' ', '_').replace('(', '').replace(')', '')}"
+            
             if last_stage_proj_col in projection_cohorts.columns: 
                 proj_counts = (projection_cohorts[last_stage_proj_col] * conv_rate)
                 projection_cohorts[proj_col_to] = proj_counts.round(0).fillna(0).astype(int) 
+                st.write(f"DEBUG: Projected for {proj_col_to} (head):", projection_cohorts[[proj_col_to]].head()) # DEBUG
                 last_stage_proj_col = proj_col_to 
-            else: projection_cohorts[proj_col_to] = 0 
+            else: 
+                st.warning(f"DEBUG: Previous stage col '{last_stage_proj_col}' not found for projecting to '{stage_to}'. Setting '{proj_col_to}' to 0.") # DEBUG
+                projection_cohorts[proj_col_to] = 0 
+                last_stage_proj_col = proj_col_to # Ensure last_stage_proj_col is updated even if prior was missing
             if stage_to == icf_stage_name: break 
-        # st.write("DEBUG: Projection Cohort Counts (Head):", projection_cohorts[[col for col in projection_cohorts.columns if col.startswith('Projected_') or col == 'Forecasted_PSQ']].head()) # DEBUG
+        
         overall_lag_days = lag_results.get(f"{ordered_stages[0]} -> {icf_stage_name}") 
         if pd.isna(overall_lag_days):
             cumulative_lag = 0; valid_lag_path = True
@@ -447,7 +455,8 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             else: display_df['Projected_CPICF_Cohort_Source'] = np.nan 
             # st.write("DEBUG: Exiting calculate_projections successfully.") # DEBUG
             return display_df
-        else: st.error("DEBUG: Could not calculate projected ICF column in cohorts."); return pd.DataFrame()          
+        else: 
+            st.error("DEBUG: Critical - Projected ICF column ('{icf_proj_col}') was NOT created in projection_cohorts."); return pd.DataFrame()        
     except Exception as e: 
         st.error(f"Projection calc error: {e}"); st.exception(e)
         return pd.DataFrame()
@@ -497,12 +506,24 @@ with st.sidebar:
         spend_df_for_editor = pd.DataFrame({'Month': future_months_ui.strftime('%Y-%m'), 'Planned_Spend': [20000.0] * proj_horizon }) 
         st.caption("Edit planned spend per month:")
         edited_spend_df = st.data_editor(spend_df_for_editor, key='proj_spend_editor', use_container_width=True, num_rows="fixed")
-        proj_spend_dict = {}
+        
+        # --- More Robust proj_spend_dict Creation ---
+        proj_spend_dict = {m: 0.0 for m in future_months_ui} # Initialize with all projection months and 0 spend
         if 'Month' in edited_spend_df.columns and 'Planned_Spend' in edited_spend_df.columns:
+             st.write("DEBUG: edited_spend_df for spend (sidebar):", edited_spend_df.head()) # DEBUG
              for index, row in edited_spend_df.iterrows():
-                 try: proj_spend_dict[pd.Period(row['Month'], freq='M')] = row['Planned_Spend']
-                 except Exception as e: pass 
-        else: st.error("Edited spend table columns missing.")
+                 try:
+                     month_str = str(row['Month']).strip() # Ensure it's a string
+                     planned_spend_val = float(row['Planned_Spend']) # Ensure it's a float
+                     month_period = pd.Period(month_str, freq='M') 
+                     proj_spend_dict[month_period] = planned_spend_val
+                 except Exception as e: 
+                     st.warning(f"DEBUG: Skipping spend row due to error: {row} -> {e}")
+                     pass 
+        else: st.error("Edited spend table columns missing ('Month', 'Planned_Spend').")
+        st.write("DEBUG: proj_spend_dict created (sidebar):", {k.strftime('%Y-%m'):v for k,v in proj_spend_dict.items()}) # DEBUG
+        # --- End Robust proj_spend_dict Creation ---
+
         st.write("Conversion Rate Assumption:")
         rate_assumption_method = st.radio( "Use Rates Based On:", ('Manual Input Below', 'Rolling Historical Average'), key='rate_method', horizontal=True )
         proj_conv_rates_input = {} 
@@ -544,7 +565,7 @@ if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
 # --- Display Sections ---
 if referral_data_processed is not None and not referral_data_processed.empty:
     st.markdown("---")
-    # st.success("Data loaded and preprocessed.") # Reduce repetitive messages
+    # st.success("Data loaded and preprocessed.") 
     tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
     with tab1:
         st.header("Monthly ProForma (Historical Cohorts)")
