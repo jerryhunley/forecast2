@@ -6,17 +6,21 @@ import re
 from datetime import datetime
 import io
 from sklearn.preprocessing import MinMaxScaler # For site scoring
-import traceback # To print full tracebacks for debugging
+import traceback 
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Recruitment Forecasting Tool", layout="wide")
 st.title("📊 Recruitment Forecasting Tool")
 
 # --- Helper Functions (Data Parsing & Timestamping) ---
+# (All helper functions parse_funnel_definition, parse_datetime_with_timezone, 
+#  parse_history_string, get_stage_timestamps, preprocess_referral_data,
+#  calculate_proforma_metrics, calculate_site_metrics, score_sites
+#  remain the same as in the previous version - Turn 70 - unless a bug fix is noted)
 
 @st.cache_data 
 def parse_funnel_definition(uploaded_file):
-    """Parses the wide-format Stage & Status Breakdown CSV."""
+    # ... (same as Turn 70) ...
     if uploaded_file is None: return None, None, None 
     try:
         bytes_data = uploaded_file.getvalue(); stringio = io.StringIO(bytes_data.decode("utf-8", errors='replace')) 
@@ -34,17 +38,18 @@ def parse_funnel_definition(uploaded_file):
         if not parsed_ordered_stages: st.error("Could not parse stages from Funnel Definition."); return None, None, None
         return parsed_funnel_definition, parsed_ordered_stages, ts_col_map
     except Exception as e: 
-        st.error(f"Error parsing Funnel Definition file: {e}")
-        # st.exception(e) # Keep this commented out unless specific debug needed
+        st.error(f"Error parsing Funnel Definition file: {e}"); st.exception(e)
         return None, None, None
 
 def parse_datetime_with_timezone(dt_str):
+    # ... (same as Turn 70) ...
     if pd.isna(dt_str): return pd.NaT 
     dt_str_cleaned = str(dt_str).strip(); tz_pattern = r'\s+(?:EST|EDT|CST|CDT|MST|MDT|PST|PDT)$'
     dt_str_no_tz = re.sub(tz_pattern, '', dt_str_cleaned); parsed_dt = pd.to_datetime(dt_str_no_tz, errors='coerce') 
     return parsed_dt
 
 def parse_history_string(history_str):
+    # ... (same as Turn 70) ...
     if pd.isna(history_str) or str(history_str).strip() == "": return []
     pattern = re.compile(r"([\w\s().'/:-]+?):\s*(\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}(?:\s*[apAP][mM])?(?:\s+[A-Za-z]{3,}(?:T)?)?)")
     raw_lines = str(history_str).strip().split('\n'); parsed_events = []
@@ -62,6 +67,7 @@ def parse_history_string(history_str):
     return parsed_events
 
 def get_stage_timestamps(row, parsed_stage_history_col, parsed_status_history_col, funnel_def, ordered_stgs, ts_col_mapping):
+    # ... (same as Turn 70) ...
     timestamps = {ts_col_mapping[stage]: pd.NaT for stage in ordered_stgs}; status_to_stage_map = {}
     if not funnel_def: return pd.Series(timestamps) 
     for stage, statuses in funnel_def.items():
@@ -84,6 +90,7 @@ def get_stage_timestamps(row, parsed_stage_history_col, parsed_status_history_co
 @st.cache_data 
 def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
     """Loads, cleans, parses history, calculates timestamps."""
+    # ... (same as Turn 70) ...
     if _df_raw is None or funnel_def is None or ordered_stages is None or ts_col_map is None: return None
     df = _df_raw.copy(); submitted_on_col = None
     if "Submitted On" in df.columns: submitted_on_col = "Submitted On"
@@ -112,7 +119,6 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
     df = pd.concat([df, timestamp_cols_df], axis=1)
     for stage, ts_col in ts_col_map.items():
          if ts_col in df.columns: df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce') 
-    st.success("Referral Data Preprocessed Successfully.")
     return df
 
 # --- Calculation Functions for App Sections ---
@@ -120,6 +126,7 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
 # @st.cache_data 
 def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
     """ Calculates historical monthly cohort metrics."""
+    # ... (same function as Turn 70) ...
     if _processed_df is None or _processed_df.empty: return pd.DataFrame()
     if not isinstance(monthly_ad_spend_input, dict): return pd.DataFrame()
     if "Submission_Month" not in _processed_df.columns: return pd.DataFrame()
@@ -174,6 +181,7 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
 # @st.cache_data 
 def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     """Calculates basic and advanced metrics per site."""
+    # ... (same function as Turn 66) ...
     if _processed_df is None or _processed_df.empty or 'Site' not in _processed_df.columns: return pd.DataFrame() 
     processed_df = _processed_df.copy(); site_metrics_list = []
     try: 
@@ -236,6 +244,7 @@ def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
 # @st.cache_data 
 def score_sites(_site_metrics_df, weights):
     """Applies normalization and weighting to score sites using percentile grading."""
+    # ... (same function as Turn 66) ...
     if _site_metrics_df is None or _site_metrics_df.empty: return pd.DataFrame()
     try: 
         site_metrics_df = _site_metrics_df.copy() 
@@ -309,20 +318,30 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
     # st.write("DEBUG: Projection Inputs Received:", {k:v for k,v in projection_inputs.items() if k != 'spend_dict'}) 
     # st.write("DEBUG: Spend Dict Keys (Months) for Proj:", list(projection_inputs.get('spend_dict', {}).keys()))
 
-    if _processed_df is None or _processed_df.empty: st.warning("DEBUG: Proj: No processed data."); return pd.DataFrame()
-    required_keys = ['horizon', 'spend_dict', 'cpqr', 'conv_rates', 'use_rolling_rates', 'rolling_window']
+    if _processed_df is None or _processed_df.empty: return pd.DataFrame()
+    required_keys = ['horizon', 'spend_dict', 'cpqr_dict', 'conv_rates', 'use_rolling_rates', 'rolling_window'] # Changed cpqr to cpqr_dict
     if not isinstance(projection_inputs, dict) or not all(k in projection_inputs for k in required_keys):
         st.warning(f"DEBUG: Proj: Missing inputs. Need: {required_keys}. Got: {projection_inputs.keys()}")
         return pd.DataFrame()
         
     processed_df = _processed_df.copy(); horizon = projection_inputs['horizon']
-    future_spend_dict = projection_inputs['spend_dict']; assumed_cpqr = projection_inputs['cpqr']
+    future_spend_dict = projection_inputs['spend_dict']
+    assumed_cpqr_dict = projection_inputs['cpqr_dict'] # Expecting a dict now
     manual_conv_rates = projection_inputs['conv_rates']; use_rolling_rates = projection_inputs['use_rolling_rates']
     rolling_window = projection_inputs['rolling_window']
-    if assumed_cpqr <= 0: st.error("CPQR must be > 0."); return pd.DataFrame()
+    # CPQR check is now per month, inside loop
 
     lag_results = {}
-    # ... (lag calculation, same as Turn 66) ...
+    for i in range(len(ordered_stages) - 1):
+        stage_from = ordered_stages[i]; stage_to = ordered_stages[i+1]; ts_col_from = ts_col_map.get(stage_from); ts_col_to = ts_col_map.get(stage_to)
+        if ts_col_from in processed_df.columns and ts_col_to in processed_df.columns and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_from]) and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_to]):
+            valid_ts_df = processed_df.dropna(subset=[ts_col_from, ts_col_to])
+            if not valid_ts_df.empty:
+                time_diff = valid_ts_df[ts_col_to] - valid_ts_df[ts_col_from]; diff_positive = time_diff[time_diff >= pd.Timedelta(days=0)] 
+                if not diff_positive.empty: lag_results[f"{stage_from} -> {stage_to}"] = diff_positive.mean().total_seconds() / (60*60*24)
+                else: lag_results[f"{stage_from} -> {stage_to}"] = np.nan
+            else: lag_results[f"{stage_from} -> {stage_to}"] = np.nan
+        else: lag_results[f"{stage_from} -> {stage_to}"] = np.nan
     start_stage = ordered_stages[0]; end_stage = "Signed ICF"; ts_col_start = ts_col_map.get(start_stage); ts_col_end = ts_col_map.get(end_stage)
     if ts_col_start in processed_df.columns and ts_col_end in processed_df.columns and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_start]) and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_end]):
          valid_ts_df_overall = processed_df.dropna(subset=[ts_col_start, ts_col_end])
@@ -332,16 +351,16 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
              else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
          else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
     else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
-    # st.write(f"DEBUG: Overall Lag (Qual->ICF): {lag_results.get(f'{start_stage} -> {end_stage}', 'N/A')} days") 
-
+    
     projection_conv_rates = {}
-    if use_rolling_rates and "Submission_Month" in processed_df.columns:
+    if use_rolling_rates and "Submission_Month" in processed_df.columns and not processed_df["Submission_Month"].dropna().empty:
         hist_counts = processed_df.groupby("Submission_Month").size().to_frame(name="Total Qualified Referrals") 
         for stage_name in ordered_stages:
              ts_col = ts_col_map.get(stage_name)
              if ts_col and ts_col in processed_df.columns and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col]):
                   reached_col_cleaned = f"Reached_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
-                  hist_counts[reached_col_cleaned] = processed_df.dropna(subset=[ts_col]).groupby("Submission_Month").size()
+                  stage_monthly_counts = processed_df.dropna(subset=[ts_col]).groupby(processed_df['Submission_Month']).size()
+                  hist_counts = hist_counts.join(stage_monthly_counts.rename(reached_col_cleaned), how='left')
         hist_counts = hist_counts.fillna(0)
         pof_hist_col = f"Reached_{ordered_stages[0].replace(' ', '_').replace('(', '').replace(')', '')}"
         base_hist_col = pof_hist_col if pof_hist_col in hist_counts.columns else "Total Qualified Referrals"
@@ -367,35 +386,37 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             else: projection_conv_rates[rate_key] = 0.0 
         if not valid_historical_rates_found: projection_conv_rates = manual_conv_rates 
     else: projection_conv_rates = manual_conv_rates
-    # st.write("DEBUG: Rates used for projection:", projection_conv_rates) 
 
     try:
         last_historical_month = processed_df["Submission_Month"].max() if "Submission_Month" in processed_df and not processed_df["Submission_Month"].empty else pd.Period(datetime.now(), freq='M') - 1
         proj_start_month = last_historical_month + 1 
         future_months = pd.period_range(start=proj_start_month, periods=horizon, freq='M')
         projection_cohorts = pd.DataFrame(index=future_months)
-        projection_cohorts['Forecasted_Ad_Spend'] = [future_spend_dict.get(m, 0) for m in future_months] 
-        projection_cohorts['Forecasted_PSQ'] = (projection_cohorts['Forecasted_Ad_Spend'] / assumed_cpqr).round(0).fillna(0).astype(int)
+        
+        projection_cohorts['Forecasted_Ad_Spend'] = [future_spend_dict.get(m, 0) for m in future_months]
+        
+        # Calculate Forecasted_PSQ using monthly CPQR
+        forecasted_psq_list = []
+        for month in future_months:
+            spend = projection_cohorts.loc[month, 'Forecasted_Ad_Spend']
+            cpqr_for_month = assumed_cpqr_dict.get(month, 120.0) # Default to 120 if month not in dict
+            if cpqr_for_month <= 0: cpqr_for_month = 120.0 # Fallback if invalid CPQR
+            forecasted_psq_list.append(np.round(spend / cpqr_for_month).astype(int) if cpqr_for_month > 0 else 0)
+        projection_cohorts['Forecasted_PSQ'] = forecasted_psq_list
+        projection_cohorts['Forecasted_PSQ'] = projection_cohorts['Forecasted_PSQ'].fillna(0).astype(int)
+
         last_stage_proj_col = 'Forecasted_PSQ'; icf_stage_name = "Signed ICF" 
         icf_proj_col = f"Projected_{icf_stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"
-        
-        # st.write("DEBUG: Initial Forecasted_PSQ head:", projection_cohorts[['Forecasted_PSQ']].head()) 
         
         for i in range(len(ordered_stages) - 1):
             stage_from = ordered_stages[i]; stage_to = ordered_stages[i+1]
             conv_rate = projection_conv_rates.get(f"{stage_from} -> {stage_to}", 0) 
             proj_col_to = f"Projected_{stage_to.replace(' ', '_').replace('(', '').replace(')', '')}"
-            
             if last_stage_proj_col in projection_cohorts.columns: 
                 proj_counts = (projection_cohorts[last_stage_proj_col] * conv_rate)
                 projection_cohorts[proj_col_to] = proj_counts.round(0).fillna(0).astype(int) 
-                # st.write(f"DEBUG: Projected for {proj_col_to} (head):", projection_cohorts[[proj_col_to]].head()) 
                 last_stage_proj_col = proj_col_to 
-            else: 
-                # This branch should ideally not be hit if Forecasted_PSQ is created
-                st.warning(f"DEBUG: Fallback - Previous stage col '{last_stage_proj_col}' not found for projecting to '{stage_to}'. Setting '{proj_col_to}' to 0.") 
-                projection_cohorts[proj_col_to] = 0 
-                last_stage_proj_col = proj_col_to # IMPORTANT: Update last_stage_proj_col even in fallback
+            else: projection_cohorts[proj_col_to] = 0; last_stage_proj_col = proj_col_to 
             if stage_to == icf_stage_name: break 
         
         overall_lag_days = lag_results.get(f"{ordered_stages[0]} -> {icf_stage_name}") 
@@ -403,13 +424,13 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             cumulative_lag = 0; valid_lag_path = True
             try: 
                 icf_index = ordered_stages.index(icf_stage_name)
-                for i in range(icf_index): # Sum lags for stages *before* ICF
+                for i in range(icf_index):
                     step_lag = lag_results.get(f"{ordered_stages[i]} -> {ordered_stages[i+1]}")
                     if pd.isna(step_lag): valid_lag_path = False; break
                     cumulative_lag += step_lag
                 if valid_lag_path: overall_lag_days = cumulative_lag
-                else: overall_lag_days = 30 # Default lag if any step-lag is missing
-            except ValueError: overall_lag_days = 30 # If ICF stage not found for some reason
+                else: overall_lag_days = 30 
+            except ValueError: overall_lag_days = 30
         lag_in_months = int(np.round(overall_lag_days / 30.4375)) if pd.notna(overall_lag_days) else 0 
         
         projection_results = pd.DataFrame(index=future_months); projection_results['Projected_ICF_Landed'] = 0 
@@ -430,21 +451,18 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
             cpicf_cohort_series = projection_cohorts['Projected_CPICF_Cohort']
             cpicf_shifted_index = cpicf_cohort_series.index + lag_in_months 
             valid_shifted_indices = cpicf_shifted_index[cpicf_shifted_index.isin(display_df.index)]
-            if not valid_shifted_indices.empty : # Check if any valid indices to map
-                # Ensure source series for .loc has the original index before shifting for selection
+            if not valid_shifted_indices.empty : 
                 source_indices_for_shift = valid_shifted_indices - lag_in_months
-                # Filter source_indices_for_shift to only those that exist in cpicf_cohort_series.index
                 valid_source_indices = source_indices_for_shift[source_indices_for_shift.isin(cpicf_cohort_series.index)]
                 if not valid_source_indices.empty:
                     cpicf_to_assign = cpicf_cohort_series.loc[valid_source_indices].copy()
-                    cpicf_to_assign.index = valid_source_indices + lag_in_months # Align index to display_df
+                    cpicf_to_assign.index = valid_source_indices + lag_in_months 
                     display_df['Projected_CPICF_Cohort_Source'] = cpicf_to_assign
                 else: display_df['Projected_CPICF_Cohort_Source'] = np.nan
             else: display_df['Projected_CPICF_Cohort_Source'] = np.nan 
-            # st.write("DEBUG: Exiting calculate_projections successfully.") 
             return display_df
         else: 
-            st.error("DEBUG: Critical - Projected ICF column ('{icf_proj_col}') was NOT created in projection_cohorts."); 
+            st.error("Critical - Projected ICF column was NOT created in projection_cohorts."); 
             return pd.DataFrame()        
     except Exception as e: 
         st.error(f"Projection calc error: {e}"); st.exception(e)
@@ -453,7 +471,6 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
 
 # --- Streamlit UI ---
 with st.sidebar:
-    # ... (Setup and Historical Spend Inputs remain same as Turn 64) ...
     st.header("⚙️ Setup")
     uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader")
     uploaded_funnel_def_file = st.file_uploader("2. Upload Funnel Definition (TSV)", type=["tsv"], key="funnel_uploader") 
@@ -485,37 +502,52 @@ with st.sidebar:
         else: weights_normalized = {k: 0 for k in weights_input} 
         st.caption(f"Weights normalized. Lower is better for TTC & Screen Fail %.")
     st.divider()
+    
+    # --- Projection Inputs ---
     with st.expander("Projection Assumptions", expanded=True): 
         proj_horizon = st.number_input("Projection Horizon (Months)", min_value=1, max_value=36, value=12, step=1, key='proj_horizon')
-        proj_cpqr = st.number_input("Assumed CPQR ($)", min_value=1.0, value=120.0, step=10.0, format="%.2f", key='proj_cpqr')
+        
+        # --- MODIFIED CPQR INPUT ---
+        st.write("Assumed CPQR ($) per Month:")
+        default_cpqr_value = 120.0
+        # --- END MODIFIED CPQR INPUT ---
+
         st.write("Future Monthly Ad Spend:")
         current_date = pd.Timestamp.now(); proj_start_month_ui = pd.Period(current_date, freq='M') + 1 
         if proj_horizon <= 0: proj_horizon = 1 
         future_months_ui = pd.period_range(start=proj_start_month_ui, periods=proj_horizon, freq='M')
+        
+        # Data Editor for Ad Spend
         spend_df_for_editor = pd.DataFrame({'Month': future_months_ui.strftime('%Y-%m'), 'Planned_Spend': [20000.0] * proj_horizon }) 
         st.caption("Edit planned spend per month:")
         edited_spend_df = st.data_editor(spend_df_for_editor, key='proj_spend_editor', use_container_width=True, num_rows="fixed")
-        
-        # --- DEBUG `proj_spend_dict` creation ---
-        st.write("DEBUG: `edited_spend_df` from data_editor (sidebar head):")
-        st.dataframe(edited_spend_df.head())
         proj_spend_dict = {}
-        # Initialize with default 0 spend for all expected future months
-        for m_init in future_months_ui: proj_spend_dict[m_init] = 0.0
-        
+        for m_init in future_months_ui: proj_spend_dict[m_init] = 0.0 # Initialize
         if 'Month' in edited_spend_df.columns and 'Planned_Spend' in edited_spend_df.columns:
              for index, row in edited_spend_df.iterrows():
                  try:
-                     month_str = str(row['Month']).strip() 
-                     planned_spend_val = float(row['Planned_Spend']) 
-                     month_period = pd.Period(month_str, freq='M') 
-                     proj_spend_dict[month_period] = planned_spend_val # Update with editor values
-                 except Exception as e: 
-                     st.warning(f"DEBUG: Skipping spend row due to error converting to dict: {row} -> {e}")
-                     pass 
-        else: st.error("DEBUG: Edited spend table columns missing ('Month', 'Planned_Spend').")
-        st.write("DEBUG: `proj_spend_dict` created (sidebar - showing YYYY-MM: Spend):", {k.strftime('%Y-%m'):v for k,v in proj_spend_dict.items()})
-        # --- END DEBUG ---
+                     month_period = pd.Period(row['Month'], freq='M') 
+                     if month_period in proj_spend_dict: # Only update if month is in expected range
+                          proj_spend_dict[month_period] = float(row['Planned_Spend'])
+                 except Exception as e: pass 
+        
+        # --- NEW Data Editor for CPQR ---
+        st.write("Assumed CPQR ($) per Month:")
+        cpqr_df_for_editor = pd.DataFrame({'Month': future_months_ui.strftime('%Y-%m'), 'Assumed_CPQR': [default_cpqr_value] * proj_horizon })
+        st.caption("Edit assumed CPQR per month:")
+        edited_cpqr_df = st.data_editor(cpqr_df_for_editor, key='proj_cpqr_editor', use_container_width=True, num_rows="fixed")
+        proj_cpqr_dict = {}
+        for m_init in future_months_ui: proj_cpqr_dict[m_init] = default_cpqr_value # Initialize
+        if 'Month' in edited_cpqr_df.columns and 'Assumed_CPQR' in edited_cpqr_df.columns:
+            for index, row in edited_cpqr_df.iterrows():
+                try:
+                    month_period = pd.Period(row['Month'], freq='M')
+                    cpqr_val = float(row['Assumed_CPQR'])
+                    if cpqr_val <=0: cpqr_val = default_cpqr_value # Ensure positive CPQR
+                    if month_period in proj_cpqr_dict: # Only update if month is in expected range
+                        proj_cpqr_dict[month_period] = cpqr_val
+                except Exception as e: pass
+        # --- END NEW Data Editor for CPQR ---
 
         st.write("Conversion Rate Assumption:")
         rate_assumption_method = st.radio( "Use Rates Based On:", ('Manual Input Below', 'Rolling Historical Average'), key='rate_method', horizontal=True )
@@ -524,7 +556,7 @@ with st.sidebar:
         if rate_assumption_method == 'Rolling Historical Average':
             use_rolling_flag = True
             rolling_window_months = st.selectbox("Select Rolling Window (Months):", [1, 3, 6], index=1, key='rolling_window') 
-            st.caption(f"NOTE: Manual rates below will be ignored. Using {rolling_window_months}-month rolling average.")
+            st.caption(f"NOTE: Manual rates below will be ignored.")
         else: st.caption("Using manually input rates below.")
         cols_rate = st.columns(2)
         with cols_rate[0]:
@@ -536,7 +568,6 @@ with st.sidebar:
 
 
 # --- Main App Logic & Display ---
-# (Initialize variables)
 referral_data_processed = None 
 funnel_definition, ordered_stages, ts_col_map = None, None, None 
 
@@ -552,13 +583,14 @@ if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
                   referrals_raw_df = pd.read_csv(stringio, sep=',', header=0, on_bad_lines='warn', low_memory=False) 
                   st.success("Referral Data Loaded (assuming CSV with header).")
                   referral_data_processed = preprocess_referral_data(referrals_raw_df, funnel_definition, ordered_stages, ts_col_map)
-             except Exception as read_err: st.error(f"Error reading referral file: {read_err}")
-        except Exception as e: st.error(f"Error loading data: {e}")
+             except Exception as read_err: st.error(f"Error reading referral file: {read_err}"); st.exception(read_err)
+        except Exception as e: st.error(f"Error loading data: {e}"); st.exception(e)
 
 # --- Display Sections ---
 if referral_data_processed is not None and not referral_data_processed.empty:
     st.markdown("---")
-    # st.success("Data loaded and preprocessed.") 
+    if "error_during_preprocessing" not in st.session_state: # Check if preprocessing was successful
+        st.success("Data loaded and preprocessed.") 
     tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
     with tab1:
         st.header("Monthly ProForma (Historical Cohorts)")
@@ -602,9 +634,12 @@ if referral_data_processed is not None and not referral_data_processed.empty:
         st.header("Projections")
         st.write("Forecasts future performance based on assumptions set in sidebar.")
         projection_inputs = {
-            'horizon': proj_horizon, 'spend_dict': proj_spend_dict, 
-            'cpqr': proj_cpqr, 'conv_rates': proj_conv_rates_input,
-            'use_rolling_rates': use_rolling_flag, 'rolling_window': rolling_window_months
+            'horizon': proj_horizon, 
+            'spend_dict': proj_spend_dict, # Use dict from Ad Spend data_editor
+            'cpqr_dict': proj_cpqr_dict,    # Use dict from CPQR data_editor
+            'conv_rates': proj_conv_rates_input,
+            'use_rolling_rates': use_rolling_flag, 
+            'rolling_window': rolling_window_months
         }
         projection_results_df = calculate_projections(referral_data_processed, ordered_stages, ts_col_map, projection_inputs)
         if projection_results_df is not None and not projection_results_df.empty and isinstance(projection_results_df, pd.DataFrame): 
@@ -629,7 +664,7 @@ if referral_data_processed is not None and not referral_data_processed.empty:
                      st.download_button(label="Download Projection Data", data=csv_proj, file_name='projection.csv', mime='text/csv', key='dl_proj')
                 except Exception as e: st.warning(f"Download button error: {e}")
             else: st.warning("Projection results table is empty after selecting columns.")
-        elif isinstance(projection_results_df, str): st.warning(projection_results_df) # Show error string if returned
+        elif isinstance(projection_results_df, str): st.warning(projection_results_df) 
         else: st.warning("Could not calculate projections.")
 
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
