@@ -12,7 +12,11 @@ import traceback
 st.set_page_config(page_title="Recruitment Forecasting Tool", layout="wide")
 st.title("📊 Recruitment Forecasting Tool")
 
-# --- Helper Functions (Data Parsing & Timestamping) ---
+# --- Helper Functions ---
+# (parse_funnel_definition, parse_datetime_with_timezone, 
+#  parse_history_string, get_stage_timestamps, preprocess_referral_data,
+#  calculate_proforma_metrics, calculate_site_metrics, score_sites
+#  remain the same as in the previous version - Turn 70/72 - unless a bug fix is noted)
 
 @st.cache_data 
 def parse_funnel_definition(uploaded_file):
@@ -240,7 +244,8 @@ def score_sites(_site_metrics_df, weights):
                 site_metrics_df[col] = 0 if col not in lower_is_better else np.nan 
             if col in lower_is_better:
                 max_val = site_metrics_df[col].max()
-                fill_val = max_val + 1 if pd.notna(max_val) and max_val > 0 else 999 
+                # Ensure fill_val is substantively different if max_val is 0 or NaN
+                fill_val = (max_val + 1) if pd.notna(max_val) else 999 
                 site_metrics_df[col] = site_metrics_df[col].fillna(fill_val) # Corrected inplace
             else: 
                 site_metrics_df[col] = site_metrics_df[col].fillna(0) # Corrected inplace
@@ -262,8 +267,8 @@ def score_sites(_site_metrics_df, weights):
         for metric, weight in weights.items():
              if metric in scaled_metrics.columns:
                  positive_weight = abs(weight) 
-                 scaled_metrics[metric] = scaled_metrics[metric].fillna(0.5) # Corrected inplace
-                 site_metrics_df['Score_Raw'] += scaled_metrics[metric] * positive_weight
+                 # Ensure scaled_metrics[metric] exists and fillna before use
+                 site_metrics_df['Score_Raw'] += scaled_metrics.get(metric, pd.Series(0.5, index=site_metrics_df.index)).fillna(0.5) * positive_weight
                  total_weight_applied += positive_weight
         if total_weight_applied > 0: site_metrics_df['Score'] = (site_metrics_df['Score_Raw'] / total_weight_applied) * 100
         else: site_metrics_df['Score'] = 0.0
@@ -292,13 +297,19 @@ def score_sites(_site_metrics_df, weights):
         st.error(f"Error during Site Scoring: {e}"); st.exception(e)
         return _site_metrics_df.reset_index() if _site_metrics_df is not None and not _site_metrics_df.empty else pd.DataFrame()
 
+# --- NEW HELPER for Projection Rates ---
 @st.cache_data
-def determine_projection_conversion_rates(_processed_df, ordered_stages, ts_col_map, 
-                                          rate_method, rolling_window, manual_rates_input):
-    if rate_method == 'Manual Input Below' or _processed_df is None or _processed_df.empty or "Submission_Month" not in _processed_df.columns or _processed_df["Submission_Month"].dropna().empty:
+def determine_effective_projection_rates(_processed_df, ordered_stages, ts_col_map, 
+                                        rate_method, rolling_window, manual_rates_input):
+    if _processed_df is None or _processed_df.empty: # If no historical data, must use manual
+        # st.sidebar.caption("No historical data; using manual rates for projection.")
+        return manual_rates_input, "Manual (No History)"
+
+    if rate_method == 'Manual Input Below':
         # st.sidebar.caption("Using manually input conversion rates for projection.")
-        return manual_rates_input
+        return manual_rates_input, "Manual"
     
+    # Calculate rolling historical rates
     calculated_rolling_rates = {}
     try:
         hist_counts = _processed_df.groupby("Submission_Month").size().to_frame(name="Total Qualified Referrals") 
@@ -336,22 +347,22 @@ def determine_projection_conversion_rates(_processed_df, ordered_stages, ts_col_
             else: calculated_rolling_rates[rate_key] = 0.0 
         
         if not valid_historical_rates_found:
-            st.sidebar.warning("Could not calculate rolling rates, using manual inputs.")
-            return manual_rates_input
+            st.sidebar.warning("Could not calculate rolling rates, using manual inputs instead.")
+            return manual_rates_input, "Manual (Rolling Calc Failed)"
         else: 
-            # Display happens in sidebar after this function is called
-            return calculated_rolling_rates
+            return calculated_rolling_rates, f"Rolling {rolling_window}-Month Avg"
     except Exception as e:
         st.sidebar.error(f"Error calculating rolling rates: {e}")
-        return manual_rates_input # Fallback to manual on error
+        return manual_rates_input, "Manual (Error in Rolling)"
 
 
-# @st.cache_data 
+@st.cache_data 
 def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_inputs): 
+    """Calculates projections based on inputs and historical data."""
     if _processed_df is None or _processed_df.empty: return pd.DataFrame()
     required_keys = ['horizon', 'spend_dict', 'cpqr_dict', 'final_conv_rates'] 
     if not isinstance(projection_inputs, dict) or not all(k in projection_inputs for k in required_keys):
-        st.warning(f"Proj: Missing inputs. Need: {required_keys}. Got: {list(projection_inputs.keys())}")
+        st.warning(f"Proj: Missing inputs. Need: {required_keys}.")
         return pd.DataFrame()
         
     processed_df = _processed_df.copy(); horizon = projection_inputs['horizon']
@@ -360,6 +371,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
     projection_conv_rates = projection_inputs['final_conv_rates'] 
     
     lag_results = {}
+    # ... (lag calculation logic same as before) ...
     start_stage = ordered_stages[0]; end_stage = "Signed ICF"; ts_col_start = ts_col_map.get(start_stage); ts_col_end = ts_col_map.get(end_stage)
     if ts_col_start in processed_df.columns and ts_col_end in processed_df.columns and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_start]) and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_end]):
          valid_ts_df_overall = processed_df.dropna(subset=[ts_col_start, ts_col_end])
@@ -447,6 +459,14 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
 
 
 # --- Streamlit UI ---
+# Initialize global/session state for shared variables if needed
+if 'referral_data_processed_init_done' not in st.session_state:
+    st.session_state.referral_data_processed_init_done = False
+
+referral_data_processed = None 
+funnel_definition, ordered_stages, ts_col_map = None, None, None 
+_effective_projection_conv_rates = {} # Initialize
+
 with st.sidebar:
     st.header("⚙️ Setup")
     uploaded_referral_file = st.file_uploader("1. Upload Referral Data (CSV)", type=["csv"], key="referral_uploader")
@@ -461,9 +481,9 @@ with st.sidebar:
         spend_val_2 = st.number_input(f"Spend {spend_month_str_2}", value=60000.0, step=1000.0, format="%.2f", key="spend_v2")
         ad_spend_input_dict = {}
         try: ad_spend_input_dict[pd.Period(spend_month_str_1, freq='M')] = spend_val_1
-        except Exception: st.warning(f"Invalid format for Month 1")
+        except Exception: pass 
         try: ad_spend_input_dict[pd.Period(spend_month_str_2, freq='M')] = spend_val_2
-        except Exception: st.warning(f"Invalid format for Month 2")
+        except Exception: pass
         st.caption("Ad Spend input method needs improvement.")
     st.divider()
     with st.expander("Site Scoring Weights"):
@@ -485,44 +505,38 @@ with st.sidebar:
         proj_horizon_sidebar = st.number_input("Projection Horizon (Months)", min_value=1, max_value=36, value=12, step=1, key='proj_horizon')
         
         st.write("Future Monthly Ad Spend:")
-        # Initialize future_months_ui with a default even if data not loaded yet
-        _proj_start_month_ui = pd.Period(datetime.now(), freq='M') + 1 
-        # This part will try to update _proj_start_month_ui if referral_data_processed is available
-        # However, referral_data_processed is defined later in the main script flow.
-        # For initial sidebar rendering, referral_data_processed will be None.
-        # This conditional logic should be inside the main app display or use session state.
-        # For now, keeping default based on current date for robust sidebar rendering.
-
-        if proj_horizon_sidebar <= 0: proj_horizon_editor = 1 
-        else: proj_horizon_editor = proj_horizon_sidebar
-        future_months_ui_for_editor = pd.period_range(start=_proj_start_month_ui, periods=proj_horizon_editor, freq='M')
-
-        spend_df_for_editor = pd.DataFrame({'Month': future_months_ui_for_editor.strftime('%Y-%m'), 'Planned_Spend': [20000.0] * proj_horizon_editor }) 
-        st.caption("Edit planned spend per month:")
-        edited_spend_df = st.data_editor(spend_df_for_editor, key='proj_spend_editor_v3', use_container_width=True, num_rows="fixed") 
+        _proj_start_month_ui_sidebar = pd.Period(datetime.now(), freq='M') + 1 # Default
+        if st.session_state.referral_data_processed_init_done and referral_data_processed is not None and not referral_data_processed.empty and "Submission_Month" in referral_data_processed:
+            last_hist_month_for_ui_sidebar = referral_data_processed["Submission_Month"].max()
+            if pd.notna(last_hist_month_for_ui_sidebar):
+                 _proj_start_month_ui_sidebar = last_hist_month_for_ui_sidebar + 1
         
+        if proj_horizon_sidebar <= 0: proj_horizon_editor_init_sidebar = 1 
+        else: proj_horizon_editor_init_sidebar = proj_horizon_sidebar
+        future_months_ui_for_editor_sidebar = pd.period_range(start=_proj_start_month_ui_sidebar, periods=proj_horizon_editor_init_sidebar, freq='M')
+
+        spend_df_for_editor = pd.DataFrame({'Month': future_months_ui_for_editor_sidebar.strftime('%Y-%m'), 'Planned_Spend': [20000.0] * proj_horizon_editor_init_sidebar }) 
+        edited_spend_df = st.data_editor(spend_df_for_editor, key='proj_spend_editor_v3', use_container_width=True, num_rows="fixed") 
         proj_spend_dict_sidebar = {} 
-        for m_init in future_months_ui_for_editor: proj_spend_dict_sidebar[m_init] = 0.0 
+        for m_init in future_months_ui_for_editor_sidebar: proj_spend_dict_sidebar[m_init] = 0.0 
         if 'Month' in edited_spend_df.columns and 'Planned_Spend' in edited_spend_df.columns:
              for index, row in edited_spend_df.iterrows():
                  try:
-                     month_str = str(row['Month']).strip() 
-                     planned_spend_val = float(row['Planned_Spend']) 
+                     month_str = str(row['Month']).strip(); planned_spend_val = float(row['Planned_Spend']) 
                      month_period = pd.Period(month_str, freq='M') 
                      if month_period in proj_spend_dict_sidebar: proj_spend_dict_sidebar[month_period] = planned_spend_val 
                  except Exception as e: pass 
         
         st.write("Assumed CPQR ($) per Month:")
         default_cpqr_value = 120.0
-        cpqr_df_for_editor = pd.DataFrame({'Month': future_months_ui_for_editor.strftime('%Y-%m'), 'Assumed_CPQR': [default_cpqr_value] * proj_horizon_editor })
+        cpqr_df_for_editor = pd.DataFrame({'Month': future_months_ui_for_editor_sidebar.strftime('%Y-%m'), 'Assumed_CPQR': [default_cpqr_value] * proj_horizon_editor_init_sidebar })
         edited_cpqr_df = st.data_editor(cpqr_df_for_editor, key='proj_cpqr_editor_v3', use_container_width=True, num_rows="fixed") 
         proj_cpqr_dict_sidebar = {}
-        for m_init in future_months_ui_for_editor: proj_cpqr_dict_sidebar[m_init] = default_cpqr_value 
+        for m_init in future_months_ui_for_editor_sidebar: proj_cpqr_dict_sidebar[m_init] = default_cpqr_value 
         if 'Month' in edited_cpqr_df.columns and 'Assumed_CPQR' in edited_cpqr_df.columns:
             for index, row in edited_cpqr_df.iterrows():
                 try:
-                    month_str = str(row['Month']).strip()
-                    cpqr_val = float(row['Assumed_CPQR'])
+                    month_str = str(row['Month']).strip(); cpqr_val = float(row['Assumed_CPQR'])
                     month_period = pd.Period(month_str, freq='M')
                     if cpqr_val <=0: cpqr_val = default_cpqr_value 
                     if month_period in proj_cpqr_dict_sidebar: proj_cpqr_dict_sidebar[month_period] = cpqr_val
@@ -544,44 +558,48 @@ with st.sidebar:
         if rate_assumption_method_sidebar == 'Rolling Historical Average':
             use_rolling_flag_sidebar = True
             rolling_window_months_sidebar = st.selectbox("Select Rolling Window (Months):", [1, 3, 6], index=1, key='rolling_window') 
-            st.caption(f"NOTE: Manual rates above will be overridden if historical data is available and valid.")
-        else: 
-            st.caption("Using manually input rates above.")
-            # When manual is chosen, effective rates are the manual ones
-            # This display will now happen in the main panel if data is available for rolling
-            # effective_projection_conv_rates_sidebar = manual_proj_conv_rates_sidebar
-
+            # Display of rates will happen in the main panel's Projections tab logic below
+        
 # --- Main App Logic & Display ---
-referral_data_processed = None 
-funnel_definition, ordered_stages, ts_col_map = None, None, None 
-if 'referral_data_processed_init_done' not in st.session_state:
-    st.session_state.referral_data_processed_init_done = False 
-
 if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
-    funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
-    if funnel_definition and ordered_stages and ts_col_map: 
-        try:
-             bytes_data = uploaded_referral_file.getvalue()
-             try: decoded_data = bytes_data.decode("utf-8")
-             except UnicodeDecodeError: decoded_data = bytes_data.decode("latin-1") 
-             stringio = io.StringIO(decoded_data)
-             try:
-                  referrals_raw_df = pd.read_csv(stringio, sep=',', header=0, on_bad_lines='warn', low_memory=False) 
-                  referral_data_processed = preprocess_referral_data(referrals_raw_df, funnel_definition, ordered_stages, ts_col_map)
-                  if referral_data_processed is not None and not referral_data_processed.empty:
-                       st.session_state.referral_data_processed_init_done = True 
-                       st.success("Referral Data Loaded and Preprocessed successfully.")
-                  else: 
-                       st.session_state.referral_data_processed_init_done = False
-                       st.error("Referral data preprocessing failed.")
-             except Exception as read_err: st.error(f"Error reading referral file: {read_err}"); st.exception(read_err)
-        except Exception as e: st.error(f"Error loading data: {e}"); st.exception(e)
+    if not st.session_state.referral_data_processed_init_done: # Only run if not already done
+        funnel_definition, ordered_stages, ts_col_map = parse_funnel_definition(uploaded_funnel_def_file)
+        if funnel_definition and ordered_stages and ts_col_map: 
+            try:
+                 bytes_data = uploaded_referral_file.getvalue()
+                 try: decoded_data = bytes_data.decode("utf-8")
+                 except UnicodeDecodeError: decoded_data = bytes_data.decode("latin-1") 
+                 stringio = io.StringIO(decoded_data)
+                 try:
+                      referrals_raw_df = pd.read_csv(stringio, sep=',', header=0, on_bad_lines='warn', low_memory=False) 
+                      referral_data_processed = preprocess_referral_data(referrals_raw_df, funnel_definition, ordered_stages, ts_col_map)
+                      if referral_data_processed is not None and not referral_data_processed.empty:
+                           st.session_state.referral_data_processed = referral_data_processed # Store in session state
+                           st.session_state.funnel_definition = funnel_definition
+                           st.session_state.ordered_stages = ordered_stages
+                           st.session_state.ts_col_map = ts_col_map
+                           st.session_state.referral_data_processed_init_done = True 
+                           st.success("Referral Data Loaded and Preprocessed successfully.")
+                      else: st.error("Referral data preprocessing failed.")
+                 except Exception as read_err: st.error(f"Error reading referral file: {read_err}"); st.exception(read_err)
+            except Exception as e: st.error(f"Error loading data: {e}"); st.exception(e)
+elif 'referral_data_processed' in st.session_state: # Use session state if available
+     referral_data_processed = st.session_state.referral_data_processed
+     funnel_definition = st.session_state.funnel_definition
+     ordered_stages = st.session_state.ordered_stages
+     ts_col_map = st.session_state.ts_col_map
 
-# --- Display Sections ---
+
+# --- Display Sections (only if data is successfully processed) ---
 if referral_data_processed is not None and not referral_data_processed.empty:
-    # st.success("Data loaded and preprocessed.") # Moved after actual processing
+    if st.session_state.referral_data_processed_init_done and not ("success_msg_shown" in st.session_state): # Show only once after processing
+        st.success("Data ready for analysis. Select a tab.")
+        st.session_state.success_msg_shown = True # Flag to prevent re-showing
+
+    st.markdown("---")
     tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
     with tab1:
+        # ... (ProForma display code) ...
         st.header("Monthly ProForma (Historical Cohorts)")
         proforma_df = calculate_proforma_metrics(referral_data_processed, ordered_stages, ts_col_map, ad_spend_input_dict) 
         if not proforma_df.empty:
@@ -598,6 +616,7 @@ if referral_data_processed is not None and not referral_data_processed.empty:
             except Exception as e: st.warning(f"Download button error: {e}")
         else: st.warning("Could not generate ProForma table.")
     with tab2:
+        # ... (Site Performance display code) ...
         st.header("Site Performance Ranking")
         site_metrics_calculated = calculate_site_metrics(referral_data_processed, ordered_stages, ts_col_map) 
         if not site_metrics_calculated.empty:
@@ -623,35 +642,28 @@ if referral_data_processed is not None and not referral_data_processed.empty:
         st.header("Projections")
         st.write("Forecasts future performance based on assumptions set in sidebar.")
         
-        # --- Determine effective projection conversion rates for this run ---
-        _effective_projection_conv_rates = {}
+        # Get effective rates for display and for projection function
+        _effective_projection_conv_rates_final = manual_proj_conv_rates_sidebar.copy() 
         if use_rolling_flag_sidebar: 
-            # Only calculate and display if data is available
-            if referral_data_processed is not None and not referral_data_processed.empty:
-                _effective_projection_conv_rates = determine_projection_conversion_rates(
-                    referral_data_processed, ordered_stages, ts_col_map, 
-                    'Rolling Historical Average', 
-                    rolling_window_months_sidebar, 
-                    manual_proj_conv_rates_sidebar 
-                )
-            else: # No data to calculate rolling, default to manual and warn
-                st.sidebar.warning("Upload data to use rolling average rates. Defaulting to manual rates.")
-                _effective_projection_conv_rates = manual_proj_conv_rates_sidebar
-        else: # Manual mode selected
-             _effective_projection_conv_rates = manual_proj_conv_rates_sidebar
+            calculated_rolling_rates = determine_projection_conversion_rates(
+                referral_data_processed, ordered_stages, ts_col_map, 
+                'Rolling Historical Average', rolling_window_months_sidebar, manual_proj_conv_rates_sidebar
+            )
+            # determine_projection_conversion_rates already displays in sidebar if successful
+            if isinstance(calculated_rolling_rates, dict) and any(val > 0 for val in calculated_rolling_rates.values()):
+                _effective_projection_conv_rates_final = calculated_rolling_rates
 
         projection_inputs = {
-            'horizon': proj_horizon_sidebar, # Use sidebar defined variable
+            'horizon': proj_horizon_sidebar, 
             'spend_dict': proj_spend_dict_sidebar, 
             'cpqr_dict': proj_cpqr_dict_sidebar,    
-            'final_conv_rates': _effective_projection_conv_rates, # Use the determined rates
+            'final_conv_rates': _effective_projection_conv_rates_final, # Use determined rates
         }
-        # Remove 'use_rolling_rates' and 'rolling_window' as they are now handled by determine_projection_conversion_rates
-        
         projection_results_df = calculate_projections(referral_data_processed, ordered_stages, ts_col_map, projection_inputs)
         
         if projection_results_df is not None and not projection_results_df.empty and isinstance(projection_results_df, pd.DataFrame): 
             st.subheader("Projected Monthly ICFs & Cohort CPICF")
+            # ... (display logic same as Turn 66, checking for column existence) ...
             display_cols_proj = ['Forecasted_Ad_Spend', 'Forecasted_Qual_Referrals', 'Projected_ICF_Landed', 'Projected_CPICF_Cohort_Source']
             results_display = projection_results_df[[col for col in display_cols_proj if col in projection_results_df.columns]].copy() 
             if not results_display.empty:
