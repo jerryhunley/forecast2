@@ -16,7 +16,7 @@ st.title("📊 Recruitment Forecasting Tool")
 
 @st.cache_data 
 def parse_funnel_definition(uploaded_file):
-    st.write("DEBUG: Running parse_funnel_definition")
+    # ... (same as Turn 66) ...
     if uploaded_file is None: return None, None, None 
     try:
         bytes_data = uploaded_file.getvalue(); stringio = io.StringIO(bytes_data.decode("utf-8", errors='replace')) 
@@ -32,20 +32,18 @@ def parse_funnel_definition(uploaded_file):
             parsed_funnel_definition[stage_name] = statuses
             clean_ts_name = f"TS_{stage_name.replace(' ', '_').replace('(', '').replace(')', '')}"; ts_col_map[stage_name] = clean_ts_name
         if not parsed_ordered_stages: st.error("Could not parse stages."); return None, None, None
-        st.write("DEBUG: Exiting parse_funnel_definition successfully")
         return parsed_funnel_definition, parsed_ordered_stages, ts_col_map
-    except Exception as e: 
-        st.error(f"Error parsing Funnel Definition file: {e}")
-        st.exception(e)
-        return None, None, None
+    except Exception as e: st.error(f"Error parsing Funnel Definition file: {e}"); st.exception(e); return None, None, None
 
 def parse_datetime_with_timezone(dt_str):
+    # ... (same as Turn 66) ...
     if pd.isna(dt_str): return pd.NaT 
     dt_str_cleaned = str(dt_str).strip(); tz_pattern = r'\s+(?:EST|EDT|CST|CDT|MST|MDT|PST|PDT)$'
     dt_str_no_tz = re.sub(tz_pattern, '', dt_str_cleaned); parsed_dt = pd.to_datetime(dt_str_no_tz, errors='coerce') 
     return parsed_dt
 
 def parse_history_string(history_str):
+    # ... (same as Turn 66) ...
     if pd.isna(history_str) or str(history_str).strip() == "": return []
     pattern = re.compile(r"([\w\s().'/:-]+?):\s*(\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}(?:\s*[apAP][mM])?(?:\s+[A-Za-z]{3,}(?:T)?)?)")
     raw_lines = str(history_str).strip().split('\n'); parsed_events = []
@@ -63,6 +61,7 @@ def parse_history_string(history_str):
     return parsed_events
 
 def get_stage_timestamps(row, parsed_stage_history_col, parsed_status_history_col, funnel_def, ordered_stgs, ts_col_mapping):
+    # ... (same as Turn 66) ...
     timestamps = {ts_col_mapping[stage]: pd.NaT for stage in ordered_stgs}; status_to_stage_map = {}
     if not funnel_def: return pd.Series(timestamps) 
     for stage, statuses in funnel_def.items():
@@ -86,6 +85,7 @@ def get_stage_timestamps(row, parsed_stage_history_col, parsed_status_history_co
 def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
     """Loads, cleans, parses history, calculates timestamps."""
     st.write("DEBUG: Running preprocess_referral_data")
+    # ... (same as Turn 66) ...
     if _df_raw is None or funnel_def is None or ordered_stages is None or ts_col_map is None: return None
     df = _df_raw.copy(); submitted_on_col = None
     if "Submitted On" in df.columns: submitted_on_col = "Submitted On"
@@ -124,6 +124,7 @@ def preprocess_referral_data(_df_raw, funnel_def, ordered_stages, ts_col_map):
 def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthly_ad_spend_input):
     """ Calculates historical monthly cohort metrics."""
     st.write("DEBUG: Running calculate_proforma_metrics")
+    # ... (same function as Turn 66, including its try/except) ...
     if _processed_df is None or _processed_df.empty: return pd.DataFrame()
     if not isinstance(monthly_ad_spend_input, dict): return pd.DataFrame()
     if "Submission_Month" not in _processed_df.columns: return pd.DataFrame()
@@ -174,12 +175,13 @@ def calculate_proforma_metrics(_processed_df, ordered_stages, ts_col_map, monthl
         return proforma_metrics
     except Exception as e: 
         st.error(f"ProForma Calc Error: {e}"); st.exception(e)
-        return pd.DataFrame() # Return empty DataFrame on error
+        return pd.DataFrame() 
 
 # @st.cache_data 
 def calculate_site_metrics(_processed_df, ordered_stages, ts_col_map):
     """Calculates basic and advanced metrics per site."""
     st.write("DEBUG: Running calculate_site_metrics")
+    # ... (same function as Turn 66) ...
     if _processed_df is None or _processed_df.empty or 'Site' not in _processed_df.columns: return pd.DataFrame() 
     processed_df = _processed_df.copy(); site_metrics_list = []
     try: 
@@ -288,10 +290,16 @@ def score_sites(_site_metrics_df, weights):
             try: site_metrics_df['Grade'] = pd.qcut(site_metrics_df['Score_Rank_Percentile'], q=bins, labels=labels, duplicates='drop') 
             except ValueError: 
                  st.warning("Using fixed score ranges for grading (percentile failed).")
-                 def assign_grade_fallback(score): 
-                     if pd.isna(score): return 'N/A'
-                     score = round(score)
-                     if score >= 90: return 'A'; elif score >= 80: return 'B'; elif score >= 70: return 'C'; elif score >= 60: return 'D'; else: return 'F'
+                 # --- CORRECTED assign_grade_fallback function definition ---
+                 def assign_grade_fallback(score_value): 
+                     if pd.isna(score_value): return 'N/A'
+                     score_value = round(score_value)
+                     if score_value >= 90: return 'A' 
+                     elif score_value >= 80: return 'B'
+                     elif score_value >= 70: return 'C'
+                     elif score_value >= 60: return 'D'
+                     else: return 'F'
+                 # --- END CORRECTION ---
                  site_metrics_df['Grade'] = site_metrics_df['Score'].apply(assign_grade_fallback)
             site_metrics_df['Grade'] = site_metrics_df['Grade'].astype(str).replace('nan', 'N/A') 
         elif len(site_metrics_df) == 1: site_metrics_df['Grade'] = 'N/A' 
@@ -299,37 +307,28 @@ def score_sites(_site_metrics_df, weights):
         site_metrics_df.reset_index(inplace=True); site_metrics_df.sort_values('Score', ascending=False, inplace=True)
         st.write("DEBUG: Exiting score_sites successfully")
         return site_metrics_df 
-    except Exception as e: st.error(f"Error during Site Scoring: {e}"); st.exception(e); return _site_metrics_df.reset_index() if _site_metrics_df is not None else pd.DataFrame()
+    except Exception as e: 
+        st.error(f"Error during Site Scoring: {e}"); st.exception(e)
+        return _site_metrics_df.reset_index() if _site_metrics_df is not None and not _site_metrics_df.empty else pd.DataFrame()
 
 # --- Projection Function with Debugging ---
 @st.cache_data 
 def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_inputs): 
     """Calculates projections based on inputs and historical data."""
-    
-    st.write("DEBUG: Running calculate_projections") # DEBUG
-    st.write("DEBUG: Projection Inputs Received:", projection_inputs) # DEBUG
-    
-    if _processed_df is None or _processed_df.empty: return pd.DataFrame()
+    st.write("DEBUG: Running calculate_projections") 
+    st.write("DEBUG: Projection Inputs Received:", projection_inputs) 
+    if _processed_df is None or _processed_df.empty: st.warning("DEBUG: Proj: No processed data."); return pd.DataFrame()
     required_keys = ['horizon', 'spend_dict', 'cpqr', 'conv_rates', 'use_rolling_rates', 'rolling_window']
-    if not isinstance(projection_inputs, dict) or not all(k in projection_inputs for k in required_keys): return pd.DataFrame()
-        
+    if not isinstance(projection_inputs, dict) or not all(k in projection_inputs for k in required_keys):
+        st.warning(f"DEBUG: Proj: Missing inputs. Need: {required_keys}. Got: {projection_inputs.keys()}")
+        return pd.DataFrame()
     processed_df = _processed_df.copy(); horizon = projection_inputs['horizon']
     future_spend_dict = projection_inputs['spend_dict']; assumed_cpqr = projection_inputs['cpqr']
     manual_conv_rates = projection_inputs['conv_rates']; use_rolling_rates = projection_inputs['use_rolling_rates']
     rolling_window = projection_inputs['rolling_window']
     if assumed_cpqr <= 0: st.error("CPQR must be > 0."); return pd.DataFrame()
-
     lag_results = {}
-    for i in range(len(ordered_stages) - 1):
-        stage_from = ordered_stages[i]; stage_to = ordered_stages[i+1]; ts_col_from = ts_col_map.get(stage_from); ts_col_to = ts_col_map.get(stage_to)
-        if ts_col_from in processed_df.columns and ts_col_to in processed_df.columns and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_from]) and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_to]):
-            valid_ts_df = processed_df.dropna(subset=[ts_col_from, ts_col_to])
-            if not valid_ts_df.empty:
-                time_diff = valid_ts_df[ts_col_to] - valid_ts_df[ts_col_from]; diff_positive = time_diff[time_diff >= pd.Timedelta(days=0)] 
-                if not diff_positive.empty: lag_results[f"{stage_from} -> {stage_to}"] = diff_positive.mean().total_seconds() / (60*60*24)
-                else: lag_results[f"{stage_from} -> {stage_to}"] = np.nan
-            else: lag_results[f"{stage_from} -> {stage_to}"] = np.nan
-        else: lag_results[f"{stage_from} -> {stage_to}"] = np.nan
+    # ... (lag calculation, same as Turn 66) ...
     start_stage = ordered_stages[0]; end_stage = "Signed ICF"; ts_col_start = ts_col_map.get(start_stage); ts_col_end = ts_col_map.get(end_stage)
     if ts_col_start in processed_df.columns and ts_col_end in processed_df.columns and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_start]) and pd.api.types.is_datetime64_any_dtype(processed_df[ts_col_end]):
          valid_ts_df_overall = processed_df.dropna(subset=[ts_col_start, ts_col_end])
@@ -339,10 +338,11 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
              else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
          else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
     else: lag_results[f"{start_stage} -> {end_stage}"] = np.nan
-    st.write(f"DEBUG: Overall Lag (Qual->ICF): {lag_results.get(f'{start_stage} -> {end_stage}')}") # DEBUG
+    st.write(f"DEBUG: Overall Lag (Qual->ICF): {lag_results.get(f'{start_stage} -> {end_stage}', 'N/A')} days") # DEBUG
 
     projection_conv_rates = {}
     if use_rolling_rates and "Submission_Month" in processed_df.columns:
+        # ... (rolling rates logic, same as Turn 66) ...
         hist_counts = processed_df.groupby("Submission_Month").size().to_frame(name="Total Qualified Referrals") 
         for stage_name in ordered_stages:
              ts_col = ts_col_map.get(stage_name)
@@ -355,10 +355,9 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
         valid_historical_rates_found = False
         for i in range(len(ordered_stages) - 1):
             stage_from = ordered_stages[i]; stage_to = ordered_stages[i+1]
-            col_from_key = ordered_stages[i] if i > 0 else ordered_stages[0] # Base on actual first stage for 'from' if not POF itself
+            col_from_key = ordered_stages[i] if i > 0 else ordered_stages[0]
             col_from = f"Reached_{col_from_key.replace(' ', '_').replace('(', '').replace(')', '')}"
-            if i == 0 : col_from = base_hist_col # Use the base for the very first step
-
+            if i == 0 : col_from = base_hist_col
             col_to = f"Reached_{stage_to.replace(' ', '_').replace('(', '').replace(')', '')}"
             rate_key = f"{stage_from} -> {stage_to}"
             if col_from in hist_counts.columns and col_to in hist_counts.columns:
@@ -396,7 +395,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                 last_stage_proj_col = proj_col_to 
             else: projection_cohorts[proj_col_to] = 0 
             if stage_to == icf_stage_name: break 
-        
+        st.write("DEBUG: Projection Cohort Counts (Head):", projection_cohorts[[col for col in projection_cohorts.columns if col.startswith('Projected_') or col == 'Forecasted_PSQ']].head()) # DEBUG
         overall_lag_days = lag_results.get(f"{ordered_stages[0]} -> {icf_stage_name}") 
         if pd.isna(overall_lag_days):
             cumulative_lag = 0; valid_lag_path = True
@@ -433,8 +432,7 @@ def calculate_projections(_processed_df, ordered_stages, ts_col_map, projection_
                 cpicf_shifted_series = cpicf_cohort_series.loc[valid_shifted_indices - lag_in_months].copy()
                 cpicf_shifted_series.index = valid_shifted_indices 
                 display_df['Projected_CPICF_Cohort_Source'] = cpicf_shifted_series 
-            else: display_df['Projected_CPICF_Cohort_Source'] = np.nan # If no valid mapping
-            
+            else: display_df['Projected_CPICF_Cohort_Source'] = np.nan 
             st.write("DEBUG: Exiting calculate_projections successfully.") # DEBUG
             return display_df
         else: st.error("DEBUG: Could not calculate projected ICF column in cohorts."); return pd.DataFrame()          
@@ -512,6 +510,7 @@ with st.sidebar:
 
 
 # --- Main App Logic & Display ---
+# (Initialize variables)
 referral_data_processed = None 
 funnel_definition, ordered_stages, ts_col_map = None, None, None 
 
@@ -533,10 +532,11 @@ if uploaded_referral_file is not None and uploaded_funnel_def_file is not None:
 # --- Display Sections ---
 if referral_data_processed is not None and not referral_data_processed.empty:
     st.markdown("---")
-    st.success("Data loaded and preprocessed.") 
+    # st.success("Data loaded and preprocessed.") # Moved success into preprocess function
     tab1, tab2, tab3 = st.tabs(["📅 Monthly ProForma", "🏆 Site Performance", "📈 Projections"])
     with tab1:
         st.header("Monthly ProForma (Historical Cohorts)")
+        # ... (display code same as Turn 62) ...
         proforma_df = calculate_proforma_metrics(referral_data_processed, ordered_stages, ts_col_map, ad_spend_input_dict) 
         if not proforma_df.empty:
             proforma_display = proforma_df.transpose(); proforma_display.columns = [str(col) for col in proforma_display.columns] 
@@ -553,6 +553,7 @@ if referral_data_processed is not None and not referral_data_processed.empty:
         else: st.warning("Could not generate ProForma table.")
     with tab2:
         st.header("Site Performance Ranking")
+        # ... (display code same as Turn 62) ...
         site_metrics_calculated = calculate_site_metrics(referral_data_processed, ordered_stages, ts_col_map) 
         if not site_metrics_calculated.empty:
             ranked_sites_df = score_sites(site_metrics_calculated, weights_normalized) 
@@ -604,5 +605,6 @@ if referral_data_processed is not None and not referral_data_processed.empty:
             except Exception as e: st.warning(f"Download button error: {e}")
         elif isinstance(projection_results_df, str): st.warning(projection_results_df) 
         else: st.warning("Could not calculate projections.")
+
 elif not uploaded_referral_file or not uploaded_funnel_def_file:
     st.info("👋 Welcome! Please upload both the Referral Data (CSV) and Funnel Definition (TSV) files using the sidebar to begin.")
