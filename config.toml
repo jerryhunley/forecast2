@@ -1,0 +1,18 @@
+[theme]
+# Primary accent color for interactive elements (widgets, buttons, etc.)
+primaryColor="#53ca97" # Your Mint
+
+# Main background color of the app
+backgroundColor="#f8f8f8" # Your Seasalt
+
+# Background color for elements like the sidebar, expanders, code blocks
+# Using Eerie Black here will make your sidebar dark, contrasting with the light main background.
+# If you prefer a lighter sidebar, you could use your "Slate Gray" or another light gray.
+secondaryBackgroundColor="#1b2222" # Your Eerie Black 
+
+# Main text color (primarily for text on the backgroundColor)
+# Streamlit will automatically try to use a light text color on dark backgrounds like the Eerie Black sidebar.
+textColor="#1b2222" # Your Eerie Black
+
+# You can also specify a font if you like: "sans serif", "serif", or "monospace"
+# font="sans serif"
